@@ -1,1 +1,2 @@
-CheckDomainName : google.com
+CheckDomainName: google.com
+LocalProxyPort: 5269

@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"github.com/elazarl/goproxy"
 	"github.com/spf13/viper"
 	"log"
+	"net/http"
 	"os"
 	"time"
 )
@@ -61,7 +63,6 @@ func RunTimer(vipConfig *viper.Viper) {
 	}()
 
 	for {
-
 		RunOnce(vipConfig)
 
 		time.Sleep(time.Minute * time.Duration(10))
@@ -80,5 +81,11 @@ func main() {
 
 	ipCache = ""
 
-	RunTimer(vipConfig)
+	go RunTimer(vipConfig)
+
+	localProxyPort := vipConfig.GetInt("LocalProxyPort")
+	proxy := goproxy.NewProxyHttpServer()
+	proxy.Verbose = true
+	//为了防止阿里云检测海外主机是否有翻墙行为我们把服务开在127.0.0.1,这样外网是检测不到你开了 httpproxy 的
+	log.Fatal(http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", localProxyPort) , proxy))
 }
