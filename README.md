@@ -4,6 +4,8 @@
 
 默认是 10 分钟进行一次检测域名对应的 IP 变了没有。
 
+同时开启本地的 http 代理
+
 ## Why
 
 最近看了一个分享 [CreditTone/FuckingWallOfChina](https://github.com/CreditTone/FuckingWallOfChina)
@@ -29,6 +31,7 @@ docker 的设置如下
 
 ```yaml
 CheckDomainName : google.com
+LocalProxyPort: 5269
 ```
 
 ### frpThings
