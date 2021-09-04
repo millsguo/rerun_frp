@@ -32,6 +32,7 @@ docker 的设置如下
 ```yaml
 CheckDomainName : google.com
 LocalProxyPort: 5269
+LocalSocks5Port: 5270
 ```
 
 ### frpThings
