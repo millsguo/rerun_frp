@@ -16,4 +16,4 @@ ENV TZ=Asia/Shanghai
 COPY --from=builder /app/rerun_frp /app/rerun_frp
 COPY frpThings /app/frpThings
 ENTRYPOINT /app/rerun_frp
-LABEL Name=rerun_frp Version=0.0.1
+LABEL Name=rerun_frp Version=0.0.2

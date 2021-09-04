@@ -1,2 +1,3 @@
 CheckDomainName: google.com
 LocalProxyPort: 5269
+LocalSocks5Port: 5270

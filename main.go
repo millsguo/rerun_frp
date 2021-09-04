@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/armon/go-socks5"
 	"github.com/elazarl/goproxy"
 	"github.com/spf13/viper"
 	"log"
@@ -84,8 +85,25 @@ func main() {
 	go RunTimer(vipConfig)
 
 	localProxyPort := vipConfig.GetInt("LocalProxyPort")
+	localSocks5Port := vipConfig.GetInt("LocalSocks5Port")
+	// 开启 socks5 代理，需要不阻塞
+	// Create a SOCKS5 server
+	conf := &socks5.Config{}
+	server, err := socks5.New(conf)
+	if err != nil {
+		panic(err)
+	}
+	go func() {
+		println("Open socks5 Port At:", localSocks5Port)
+		// Create SOCKS5 proxy on localhost port 8000
+		if err = server.ListenAndServe("tcp", fmt.Sprintf("127.0.0.1:%d", localProxyPort)); err != nil {
+			panic(err)
+		}
+	}()
+	// 开启 http 代理，这里会阻塞
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = true
+	println("Open http Port At:", localProxyPort)
 	//为了防止阿里云检测海外主机是否有翻墙行为我们把服务开在127.0.0.1,这样外网是检测不到你开了 httpproxy 的
 	log.Fatal(http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", localProxyPort) , proxy))
 }
