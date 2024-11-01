@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"time"
 )
 
 type OneJob struct {
@@ -96,11 +97,34 @@ func startFrp(oneJob *OneJob) {
 }
 
 func GetIP(domainName string) (string, error) {
-	addr, err := net.ResolveIPAddr("ip", domainName)
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}
+			return d.DialContext(ctx, "udp", "223.5.5.5:53")
+		},
+	}
+
+	addr, err := resolver.LookupHost(context.Background(), domainName)
+	//addr, err := net.ResolveIPAddr("ip", domainName)
 	if err != nil {
 		return "", err
 	}
-	fmt.Println("Resolved address is", addr.String())
 
-	return addr.String(), nil
+	//处理解析结果，只有一个IP时，直接返回，有多个时，只返回第一个
+	var result string
+	switch len(addr) {
+	case 0:
+		result = ""
+	case 1:
+		result = addr[0]
+	default:
+		result = addr[0]
+	}
+	//fmt.Println("Resolved address is", addr.String())
+	fmt.Println("Resolved address is ", result)
+	return result, nil
 }
