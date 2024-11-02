@@ -96,7 +96,7 @@ func startFrp(oneJob *OneJob) {
 	}
 }
 
-func GetIP(domainName string) (string, error) {
+func GetIP(domainName string, dnsAddress string) (string, error) {
 	resolver := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -104,7 +104,7 @@ func GetIP(domainName string) (string, error) {
 				Timeout:   10 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}
-			return d.DialContext(ctx, "udp", "223.5.5.5:53")
+			return d.DialContext(ctx, "udp", dnsAddress+":53")
 		},
 	}
 

@@ -12,13 +12,14 @@ import (
 )
 
 var (
-	ipCache		  string
-	oneJob = &OneJob{}
+	ipCache string
+	oneJob  = &OneJob{}
 )
 
 func RunOnce(vipConfig *viper.Viper) {
 	domainName := vipConfig.GetString("CheckDomainName")
-	ipTmp, err := GetIP(domainName)
+	dnsAddress := vipConfig.GetString("DnsAddress")
+	ipTmp, err := GetIP(domainName, dnsAddress)
 	if err != nil {
 		log.Println("GetIP Error:", err)
 		return
@@ -66,7 +67,7 @@ func RunTimer(vipConfig *viper.Viper) {
 	for {
 		RunOnce(vipConfig)
 
-		time.Sleep(time.Minute * time.Duration(10))
+		time.Sleep(time.Minute * time.Duration(5))
 	}
 }
 
