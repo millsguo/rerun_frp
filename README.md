@@ -2,7 +2,7 @@
 
 本项目的目标是检测某一个域名的 IP 是否标动，然后重启 frp 以重新连接。
 
-默认是 10 分钟进行一次检测域名对应的 IP 变了没有。
+默认是 5 分钟进行一次检测域名对应的 IP 变了没有。
 
 同时开启本地的 http、socks5 代理
 
@@ -31,6 +31,7 @@ docker 的设置如下
 
 ```yaml
 CheckDomainName : google.com
+DnsAddress: 8.8.8.8
 LocalProxyPort: 5269
 LocalSocks5Port: 5270
 ```
