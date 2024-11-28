@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -26,10 +25,10 @@ func FileExist(path string) bool {
 	return !os.IsNotExist(err)
 }
 
-func InitFrpArgs(nowdir string, oneJob *OneJob) bool {
-	nowdir = nowdir + string(os.PathSeparator) + "frpThings" + string(os.PathSeparator)
-	absPath_Frp := nowdir + "frp"
-	absPath_Frp_ini := nowdir + "frp.ini"
+func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
+	nowDir = nowDir + string(os.PathSeparator) + "frpThings" + string(os.PathSeparator)
+	absPathFrp := nowDir + "frp"
+	absPathFrpIni := nowDir + "frp.ini"
 
 	switch runtime.GOOS {
 	case "darwin":
@@ -37,22 +36,22 @@ func InitFrpArgs(nowdir string, oneJob *OneJob) bool {
 	case "linux":
 		break
 	case "windows":
-		absPath_Frp += ".exe"
+		absPathFrp += ".exe"
 	}
 
-	if FileExist(absPath_Frp) == false {
-		log.Panicln(absPath_Frp + " not exist.")
+	if FileExist(absPathFrp) == false {
+		log.Panicln(absPathFrp + " not exist.")
 		return false
 	}
-	if FileExist(absPath_Frp_ini) == false {
-		log.Panicln(absPath_Frp_ini + " not exist.")
+	if FileExist(absPathFrpIni) == false {
+		log.Panicln(absPathFrpIni + " not exist.")
 		return false
 	}
 
-	oneJob.CmdLine = absPath_Frp
+	oneJob.CmdLine = absPathFrp
 	oneJob.CmdArgs = []string{
 		"-c",
-		absPath_Frp_ini,
+		absPathFrpIni,
 	}
 
 	return true
@@ -79,13 +78,89 @@ func StartFrpThings(oneJob *OneJob) bool {
 }
 
 func CloseFrp(oneJob *OneJob) bool {
+	log.Printf("Close frpc ...")
+	// 取消上下文
 	oneJob.Cancel()
-	_ = oneJob.Cmder.Wait()
+
+	// 等待命令完成
+	done := make(chan error, 1)
+	go func() {
+		done <- oneJob.Cmder.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("frpc exited with error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		log.Printf("frpc did not exit within the timeout period, killing it forcefully.")
+		if err := oneJob.Cmder.Process.Kill(); err != nil {
+			log.Printf("Failed to kill frpc process: %v", err)
+		}
+	}
+
+	// 标记为未运行
 	oneJob.Running = false
+	log.Printf("Close frpc Done.")
 	return true
+	//oneJob.Cancel()
+	//_ = oneJob.Cmder.Wait()
+	//oneJob.Running = false
+	//log.Printf("Close frpc Done.")
+	//return true
 }
 
 func startFrp(oneJob *OneJob) {
+	log.Printf("Start frpc ...")
+	// 创建一个带有超时的子上下文
+	oneJob.Ctx, oneJob.Cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer func() {
+		if oneJob.Err != nil {
+			oneJob.Cancel()
+		}
+	}()
+
+	// 创建命令
+	oneJob.Cmder = exec.CommandContext(oneJob.Ctx, oneJob.CmdLine, oneJob.CmdArgs...)
+
+	// 设置输出
+	oneJob.Cmder.Stdout = os.Stdout
+
+	// 启动命令
+	err := oneJob.Cmder.Start()
+	if err != nil {
+		log.Printf("Failed to start frpc: %v", err)
+		oneJob.Err = err
+		return
+	}
+
+	// 标记为运行中
+	oneJob.Running = true
+
+	// 等待命令完成或被取消
+	done := make(chan error, 1)
+	go func() {
+		done <- oneJob.Cmder.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			log.Printf("frpc exited with error: %v", err)
+			oneJob.Err = err
+		}
+		oneJob.Running = false
+	case <-oneJob.Ctx.Done():
+		log.Printf("frpc canceled: %v", oneJob.Ctx.Err())
+		if err := oneJob.Cmder.Process.Kill(); err != nil {
+			log.Printf("Failed to kill frpc process: %v", err)
+			oneJob.Err = err
+		}
+		oneJob.Running = false
+	}
+
+	/* 弃用
 	oneJob.Ctx, oneJob.Cancel = context.WithCancel(context.Background())
 	oneJob.Cmder = exec.CommandContext(oneJob.Ctx, oneJob.CmdLine, oneJob.CmdArgs...)
 	// oneJob.Cmder.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
@@ -94,6 +169,7 @@ func startFrp(oneJob *OneJob) {
 	if err != nil {
 		oneJob.Err = err
 	}
+	*/
 }
 
 func GetIP(domainName string, dnsAddress string) (string, error) {
@@ -125,6 +201,7 @@ func GetIP(domainName string, dnsAddress string) (string, error) {
 		result = addr[0]
 	}
 	//fmt.Println("Resolved address is", addr.String())
-	fmt.Println("Resolved address is ", result)
+	//fmt.Println("Resolved address is ", result)
+	log.Printf("Resolved address is [" + result + "]")
 	return result, nil
 }
