@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -40,11 +40,11 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 	}
 
 	if FileExist(absPathFrp) == false {
-		log.Panicln(absPathFrp + " not exist.")
+		fmt.Println(absPathFrp, " not exist.")
 		return false
 	}
 	if FileExist(absPathFrpIni) == false {
-		log.Panicln(absPathFrpIni + " not exist.")
+		fmt.Println(absPathFrpIni, " not exist.")
 		return false
 	}
 
@@ -63,14 +63,14 @@ func StartFrpThings(oneJob *OneJob) bool {
 		return false
 	}
 
-	log.Printf("Start frp ...")
+	fmt.Println("Start frp ...")
 	startFrp(oneJob)
 	if oneJob.Err != nil {
-		log.Printf("Start frp Error")
-		log.Panicln(oneJob.Err.Error())
+		fmt.Println("Start frp Error")
+		fmt.Println(oneJob.Err.Error())
 		return false
 	}
-	log.Printf("Start frpc Done.")
+	fmt.Println("Start frpc Done.")
 
 	oneJob.Running = true
 
@@ -78,7 +78,7 @@ func StartFrpThings(oneJob *OneJob) bool {
 }
 
 func CloseFrp(oneJob *OneJob) bool {
-	log.Printf("Close frpc ...")
+	fmt.Println("Close frpc ...")
 	// 取消上下文
 	oneJob.Cancel()
 
@@ -88,33 +88,25 @@ func CloseFrp(oneJob *OneJob) bool {
 		done <- oneJob.Cmder.Wait()
 	}()
 
-	select {
-	case err := <-done:
-		if err != nil {
-			log.Printf("frpc exited with error: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		log.Printf("frpc did not exit within the timeout period, killing it forcefully.")
-		if err := oneJob.Cmder.Process.Kill(); err != nil {
-			log.Printf("Failed to kill frpc process: %v", err)
-		}
+	if err := oneJob.Cmder.Process.Kill(); err != nil {
+		fmt.Println("Failed to kill frpc process:", err)
 	}
 
 	// 标记为未运行
 	oneJob.Running = false
-	log.Printf("Close frpc Done.")
+	fmt.Println("Close frpc Done.")
 	return true
 	//oneJob.Cancel()
 	//_ = oneJob.Cmder.Wait()
 	//oneJob.Running = false
-	//log.Printf("Close frpc Done.")
+	//fmt.Println("Close frpc Done.")
 	//return true
 }
 
 func startFrp(oneJob *OneJob) {
-	log.Printf("Start frpc ...")
+	fmt.Println("Start frpc ...")
 	// 创建一个带有超时的子上下文
-	oneJob.Ctx, oneJob.Cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	oneJob.Ctx, oneJob.Cancel = context.WithCancel(context.Background())
 	defer func() {
 		if oneJob.Err != nil {
 			oneJob.Cancel()
@@ -130,7 +122,7 @@ func startFrp(oneJob *OneJob) {
 	// 启动命令
 	err := oneJob.Cmder.Start()
 	if err != nil {
-		log.Printf("Failed to start frpc: %v", err)
+		fmt.Println("Failed to start frpc: ", err)
 		oneJob.Err = err
 		return
 	}
@@ -138,27 +130,27 @@ func startFrp(oneJob *OneJob) {
 	// 标记为运行中
 	oneJob.Running = true
 
-	// 等待命令完成或被取消
-	done := make(chan error, 1)
-	go func() {
-		done <- oneJob.Cmder.Wait()
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			log.Printf("frpc exited with error: %v", err)
-			oneJob.Err = err
-		}
-		oneJob.Running = false
-	case <-oneJob.Ctx.Done():
-		log.Printf("frpc canceled: %v", oneJob.Ctx.Err())
-		if err := oneJob.Cmder.Process.Kill(); err != nil {
-			log.Printf("Failed to kill frpc process: %v", err)
-			oneJob.Err = err
-		}
-		oneJob.Running = false
-	}
+	//// 等待命令完成或被取消
+	//done := make(chan error, 1)
+	//go func() {
+	//	done <- oneJob.Cmder.Wait()
+	//}()
+	//
+	//select {
+	//case err := <-done:
+	//	if err != nil {
+	//		fmt.Println("frpc exited with error: %v", err)
+	//		oneJob.Err = err
+	//	}
+	//	oneJob.Running = false
+	//case <-oneJob.Ctx.Done():
+	//	fmt.Println("frpc canceled: %v", oneJob.Ctx.Err())
+	//	if err := oneJob.Cmder.Process.Kill(); err != nil {
+	//		fmt.Println("Failed to kill frpc process: %v", err)
+	//		oneJob.Err = err
+	//	}
+	//	oneJob.Running = false
+	//}
 
 	/* 弃用
 	oneJob.Ctx, oneJob.Cancel = context.WithCancel(context.Background())
@@ -202,6 +194,6 @@ func GetIP(domainName string, dnsAddress string) (string, error) {
 	}
 	//fmt.Println("Resolved address is", addr.String())
 	//fmt.Println("Resolved address is ", result)
-	log.Printf("Resolved address is [" + result + "]")
+	fmt.Println("Resolved address is [", result, "]")
 	return result, nil
 }
