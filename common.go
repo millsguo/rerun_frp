@@ -80,27 +80,66 @@ func StartFrpThings(oneJob *OneJob) bool {
 func CloseFrp(oneJob *OneJob) bool {
 	fmt.Println("Close frpc ...")
 	// 取消上下文
-	oneJob.Cancel()
-
-	// 等待命令完成
-	done := make(chan error, 1)
-	go func() {
-		done <- oneJob.Cmder.Wait()
-	}()
-
-	if err := oneJob.Cmder.Process.Kill(); err != nil {
-		fmt.Println("Failed to kill frpc process:", err)
+	if oneJob.Cancel != nil {
+		oneJob.Cancel()
 	}
+
+	// 确保进程存在
+	if oneJob.Cmder != nil && oneJob.Cmder.Process != nil {
+		// 尝试优雅地终止进程
+		if err := oneJob.Cmder.Process.Signal(os.Interrupt); err != nil {
+			fmt.Println("Failed to send interrupt signal to frpc process:", err)
+		}
+
+		// 创建一个通道来接收 Wait 的结果
+		waitChan := make(chan error, 1)
+		go func() {
+			waitChan <- oneJob.Cmder.Wait()
+		}()
+
+		// 等待一段时间让进程优雅退出
+		select {
+		case <-time.After(5 * time.Second):
+			// 如果进程还未退出，则强制终止
+			if err := oneJob.Cmder.Process.Kill(); err != nil {
+				fmt.Println("Failed to kill frpc process:", err)
+			}
+		case err := <-waitChan:
+			if err != nil {
+				fmt.Println("frpc exited with error:", err)
+			}
+		}
+	} else {
+		fmt.Println("No frpc process to close.")
+	}
+
+	// 检查系统中是否有其他 frp 进程并强制关闭
+	killFrpProcesses()
 
 	// 标记为未运行
 	oneJob.Running = false
 	fmt.Println("Close frpc Done.")
 	return true
-	//oneJob.Cancel()
-	//_ = oneJob.Cmder.Wait()
-	//oneJob.Running = false
-	//fmt.Println("Close frpc Done.")
-	//return true
+}
+
+func killFrpProcesses() {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin", "linux":
+		cmd = exec.Command("pkill", "-f", "frp")
+	case "windows":
+		cmd = exec.Command("taskkill", "/F", "/IM", "frp.exe")
+	default:
+		fmt.Println("Unsupported OS for killing frp processes.")
+		return
+	}
+
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println("Failed to kill frp processes:", err)
+	} else {
+		fmt.Println("Successfully killed all frp processes.")
+	}
 }
 
 func startFrp(oneJob *OneJob) {
