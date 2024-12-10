@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -77,7 +79,7 @@ func StartFrpThings(oneJob *OneJob) bool {
 	return true
 }
 
-func CloseFrp(oneJob *OneJob) bool {
+func closeFrp(oneJob *OneJob) bool {
 	fmt.Println("Close frpc ...")
 	// 取消上下文
 	if oneJob.Cancel != nil {
@@ -155,11 +157,19 @@ func startFrp(oneJob *OneJob) {
 	// 创建命令
 	oneJob.Cmder = exec.CommandContext(oneJob.Ctx, oneJob.CmdLine, oneJob.CmdArgs...)
 
+	// 创建一个管道来读取标准输出
+	stdoutPipe, err := oneJob.Cmder.StdoutPipe()
+	if err != nil {
+		fmt.Println("Failed to create stdout pipe:", err)
+		oneJob.Err = err
+		return
+	}
+
 	// 设置输出
-	oneJob.Cmder.Stdout = os.Stdout
+	//oneJob.Cmder.Stdout = os.Stdout
 
 	// 启动命令
-	err := oneJob.Cmder.Start()
+	err = oneJob.Cmder.Start()
 	if err != nil {
 		fmt.Println("Failed to start frpc: ", err)
 		oneJob.Err = err
@@ -169,38 +179,29 @@ func startFrp(oneJob *OneJob) {
 	// 标记为运行中
 	oneJob.Running = true
 
-	//// 等待命令完成或被取消
-	//done := make(chan error, 1)
-	//go func() {
-	//	done <- oneJob.Cmder.Wait()
-	//}()
-	//
-	//select {
-	//case err := <-done:
-	//	if err != nil {
-	//		fmt.Println("frpc exited with error: %v", err)
-	//		oneJob.Err = err
-	//	}
-	//	oneJob.Running = false
-	//case <-oneJob.Ctx.Done():
-	//	fmt.Println("frpc canceled: %v", oneJob.Ctx.Err())
-	//	if err := oneJob.Cmder.Process.Kill(); err != nil {
-	//		fmt.Println("Failed to kill frpc process: %v", err)
-	//		oneJob.Err = err
-	//	}
-	//	oneJob.Running = false
-	//}
+	// 读取标准输出并检查是否包含"retry"
+	go func() {
+		scanner := bufio.NewScanner(stdoutPipe)
+		for scanner.Scan() {
+			output := scanner.Text()
+			fmt.Println(output) // 打印输出
+			if strings.Contains(output, "retry") {
+				fmt.Println("Detected 'retry' in output. Restarting frpc...")
+				closeFrp(oneJob) // 假设 closeFrp 是一个已经存在的函数
+				startFrp(oneJob) // 重新启动 frpc
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			fmt.Println("Error reading stdout:", err)
+		}
+	}()
 
-	/* 弃用
-	oneJob.Ctx, oneJob.Cancel = context.WithCancel(context.Background())
-	oneJob.Cmder = exec.CommandContext(oneJob.Ctx, oneJob.CmdLine, oneJob.CmdArgs...)
-	// oneJob.Cmder.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	oneJob.Cmder.Stdout = os.Stdout
-	err := oneJob.Cmder.Start()
+	// 等待命令完成
+	err = oneJob.Cmder.Wait()
 	if err != nil {
+		fmt.Println("frpc exited with error:", err)
 		oneJob.Err = err
 	}
-	*/
 }
 
 func GetIP(domainName string, dnsAddress string) (string, error) {

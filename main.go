@@ -21,12 +21,12 @@ func RunOnce(vipConfig *viper.Viper) {
 	dnsAddress := vipConfig.GetString("DnsAddress")
 	ipTmp, err := GetIP(domainName, dnsAddress)
 	if err != nil {
-		log.Println("GetIP Error:", err)
+		fmt.Println("GetIP Error:", err)
 		return
 	}
 	nowDir, _ := os.Getwd()
 	if initOk := InitFrpArgs(nowDir, oneJob); initOk == false {
-		log.Println("InitFrpArgs Error.")
+		fmt.Println("InitFrpArgs Error.")
 		return
 	}
 	// 第一次
@@ -35,13 +35,13 @@ func RunOnce(vipConfig *viper.Viper) {
 		StartFrpThings(oneJob)
 	} else {
 		// 非第一次
-		log.Println("Org IP:", ipCache)
-		log.Println("New IP:", ipTmp)
+		fmt.Println("Org IP:", ipCache)
+		fmt.Println("New IP:", ipTmp)
 
 		if ipTmp != ipCache {
 			// 重新启动 Frp
 			log.Printf("Close frp ...")
-			CloseFrp(oneJob)
+			closeFrp(oneJob)
 			log.Printf("Close frp Done.")
 
 			ipCache = ipTmp
@@ -54,7 +54,7 @@ func RunOnce(vipConfig *viper.Viper) {
 func RunTimer(vipConfig *viper.Viper) {
 	defer func() {
 		if oneJob.Running == true {
-			CloseFrp(oneJob)
+			closeFrp(oneJob)
 		}
 
 		if err := recover(); err != nil {
