@@ -1,18 +1,9 @@
 # rerun_frp
+本项目fork自github.com/allanpk716/rerun_frp，感谢所有的贡献者
 
-本项目的目标是检测某一个域名的 IP 是否标动，然后重启 frp 以重新连接。
+本项目的目标是检测某一个域名的 IP 是否标动，然后重启 frp 以重新连接。如果目标断开，系统会在3分钟后自动重连，同时会检测目标域名IP是否变化
 
-默认是 5 分钟进行一次检测域名对应的 IP 变了没有。
-
-同时开启本地的 http、socks5 代理
-
-## Why
-
-最近看了一个分享 [CreditTone/FuckingWallOfChina](https://github.com/CreditTone/FuckingWallOfChina)
-
-然后根据这个，就打算把外面的一个服务器连接家里的 frps，当然是有动态外网 IP 的，参考个人魔改的 [allanpk716/ddns-go](https://github.com/allanpk716/ddns-go) 来使用。
-
-具体这么做干嘛，需要你自己去摸索。任何风险请自行承担！
+同时开启本地的 http、socks5 代理，本地代理支持用户认证，需要用户名/密码
 
 ## How to use
 
@@ -34,6 +25,8 @@ CheckDomainName : google.com
 DnsAddress: 8.8.8.8
 LocalProxyPort: 5269
 LocalSocks5Port: 5270
+ProxyUser: username
+ProxyPass: password
 ```
 
 ### frpThings
