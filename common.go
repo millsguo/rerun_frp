@@ -252,14 +252,8 @@ func startFrp(oneJob *OneJob) {
 		for scanner.Scan() {
 			output := scanner.Text()
 			fmt.Printf("[frp %s] %s\n", name, output)
-			if strings.Contains(output, "retry") {
-				fmt.Println("检测到重试关键字，启动重置流程...")
-				oneJob.scheduleRetry()
-			} else if strings.Contains(output, "refused") {
-				fmt.Println("检测到拒绝关键字，启动重置流程...")
-				oneJob.scheduleRetry()
-			} else if strings.Contains(output, "error") {
-				fmt.Println("检测到重试关键字，启动重置流程...")
+			if strings.Contains(output, "retry") || strings.Contains(output, "refused") || strings.Contains(output, "error") {
+				fmt.Println("检测到异常关键字，启动重置流程...")
 				oneJob.scheduleRetry()
 			}
 		}
@@ -325,24 +319,37 @@ func GetIP(domainName string, dnsAddress string) (string, error) {
 		},
 	}
 
+	// 获取所有类型的IP地址
 	addr, err := resolver.LookupHost(context.Background(), domainName)
-	//addr, err := net.ResolveIPAddr("ip", domainName)
 	if err != nil {
 		return "", err
 	}
 
-	//处理解析结果，只有一个IP时，直接返回，有多个时，只返回第一个
+	// 过滤IPv4地址
+	var ipv4Address []string
+	for _, a := range addr {
+		ip := net.ParseIP(a)
+		if ip != nil && ip.To4() != nil {
+			ipv4Address = append(ipv4Address, a)
+		}
+	}
+
+	// 处理过滤后的结果
 	var result string
-	switch len(addr) {
+	switch len(ipv4Address) {
 	case 0:
 		result = ""
 	case 1:
-		result = addr[0]
+		result = ipv4Address[0]
 	default:
-		result = addr[0]
+		result = ipv4Address[0] // 多个IPv4时返回第一个
 	}
-	//fmt.Println("Resolved address is", addr.String())
-	//fmt.Println("Resolved address is ", result)
-	fmt.Println("Resolved address is [", result, "]")
+
+	// 增强调试信息
+	if len(ipv4Address) > 1 {
+		fmt.Printf("Resolved multiple IPv4 addresses: %v\n", ipv4Address)
+	}
+	fmt.Printf("Final selected IPv4: [%s]\n", result)
+
 	return result, nil
 }

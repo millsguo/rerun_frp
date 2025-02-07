@@ -155,38 +155,62 @@ func main() {
 
 	// 检查是否配置了认证信息
 	if proxyUser == "" || proxyPass == "" {
-		log.Fatal("Proxy authentication credentials are required")
+		// 开启 socks5 代理
+		go func() {
+			// Create a SOCKS5 server
+			conf := &socks5.Config{}
+			server, err := socks5.New(conf)
+			if err != nil {
+				panic(err)
+			}
+			println("Open socks5 Port At:", localSocks5Port)
+			// Create SOCKS5 proxy on localhost port 8000
+			if err = server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", localSocks5Port)); err != nil {
+				panic(err)
+			}
+		}()
+		// 开启 http 代理
+		go func() {
+			proxy := goproxy.NewProxyHttpServer()
+			proxy.Verbose = true
+			println("Open http Port At:", localProxyPort)
+			//为了防止阿里云检测海外主机是否有翻墙行为我们把服务开在127.0.0.1,这样外网是检测不到你开了 httpproxy 的
+			log.Fatal(http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", localProxyPort), proxy))
+		}()
+
+		select {}
+	} else {
+
+		// 开启 socks5 代理（带认证）
+		go func() {
+			server, err := createSocks5Server(proxyUser, proxyPass)
+			if err != nil {
+				panic(err)
+			}
+
+			log.Printf("SOCKS5 proxy with authentication enabled on :%d", localSocks5Port)
+			if err := server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", localSocks5Port)); err != nil {
+				panic(err)
+			}
+		}()
+
+		// 开启 http 代理（带认证）
+		go func() {
+			proxy := goproxy.NewProxyHttpServer()
+			proxy.Verbose = true
+
+			// 包装原始handler加入认证
+			authHandler := authMiddleware(proxyUser, proxyPass, proxy)
+
+			log.Printf("HTTP proxy with authentication enabled on :%d", localProxyPort)
+			log.Fatal(http.ListenAndServe(
+				fmt.Sprintf("0.0.0.0:%d", localProxyPort),
+				authHandler,
+			))
+		}()
+
+		select {}
 	}
-
-	// 开启 socks5 代理（带认证）
-	go func() {
-		server, err := createSocks5Server(proxyUser, proxyPass)
-		if err != nil {
-			panic(err)
-		}
-
-		log.Printf("SOCKS5 proxy with authentication enabled on :%d", localSocks5Port)
-		if err := server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", localSocks5Port)); err != nil {
-			panic(err)
-		}
-	}()
-
-	// 开启 http 代理（带认证）
-	go func() {
-		proxy := goproxy.NewProxyHttpServer()
-		proxy.Verbose = true
-
-		// 包装原始handler加入认证
-		authHandler := authMiddleware(proxyUser, proxyPass, proxy)
-
-		log.Printf("HTTP proxy with authentication enabled on :%d", localProxyPort)
-		log.Fatal(http.ListenAndServe(
-			fmt.Sprintf("0.0.0.0:%d", localProxyPort),
-			authHandler,
-		))
-	}()
-
-	select {}
 }
 
 //func main() {
