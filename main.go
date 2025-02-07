@@ -3,50 +3,48 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
-	"github.com/armon/go-socks5"
-	"github.com/elazarl/goproxy"
-	"github.com/spf13/viper"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
+
+	"github.com/armon/go-socks5"
+	"github.com/elazarl/goproxy"
+	"github.com/spf13/viper"
 )
 
 var (
-	ipCache string
-	oneJob  = &OneJob{}
+	ipCache    string
+	ipCacheMu  sync.RWMutex
+	oneJob     = &OneJob{}
+	oneJobMu   sync.RWMutex
+	shutdownCh = make(chan struct{})
 )
 
-// 添加认证中间件函数
 func authMiddleware(proxyUser, proxyPass string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 获取代理认证头
 		auth := r.Header.Get("Proxy-Authorization")
 		if auth == "" {
 			askForAuth(w)
 			return
 		}
 
-		// 验证认证信息
 		if !validateAuth(auth, proxyUser, proxyPass) {
 			askForAuth(w)
 			return
 		}
 
-		// 认证通过，继续处理
 		next.ServeHTTP(w, r)
 	})
 }
 
 func askForAuth(w http.ResponseWriter) {
-	w.Header().Set("Proxy-Authenticate", "Basic realm=\"Proxy Authorization Required\"")
-	w.WriteHeader(http.StatusProxyAuthRequired)
-
-	_, err := w.Write([]byte("Proxy authentication required\n"))
-	if err != nil {
-		return
-	}
+	w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy Authorization Required"`)
+	http.Error(w, "Proxy authentication required\n", http.StatusProxyAuthRequired)
 }
 
 func validateAuth(authHeader, user, pass string) bool {
@@ -60,91 +58,150 @@ func validateAuth(authHeader, user, pass string) bool {
 		return false
 	}
 
-	authString := strings.SplitN(string(decoded), ":", 2)
-	if len(authString) != 2 {
+	authParts := strings.SplitN(string(decoded), ":", 2)
+	if len(authParts) != 2 {
 		return false
 	}
 
-	return authString[0] == user && authString[1] == pass
+	return authParts[0] == user && authParts[1] == pass
 }
 
-// 修改SOCKS5配置部分
 func createSocks5Server(user, pass string) (*socks5.Server, error) {
-	authString := socks5.StaticCredentials{
-		user: pass,
-	}
-	authenticator := socks5.UserPassAuthenticator{Credentials: authString}
+	authData := make(socks5.StaticCredentials)
+	authData[user] = pass
 
-	conf := &socks5.Config{
+	authenticator := socks5.UserPassAuthenticator{Credentials: authData}
+	return socks5.New(&socks5.Config{
 		AuthMethods: []socks5.Authenticator{authenticator},
-	}
-
-	return socks5.New(conf)
+	})
 }
 
 func RunOnce(vipConfig *viper.Viper) {
 	domainName := vipConfig.GetString("CheckDomainName")
 	dnsAddress := vipConfig.GetString("DnsAddress")
+
 	ipTmp, err := GetIP(domainName, dnsAddress)
 	if err != nil {
-		fmt.Println("GetIP Error:", err)
+		log.Printf("GetIP error: %v", err)
 		return
 	}
+
 	nowDir, _ := os.Getwd()
-	if initOk := InitFrpArgs(nowDir, oneJob); initOk == false {
-		fmt.Println("InitFrpArgs Error.")
+	if ok := InitFrpArgs(nowDir, oneJob); !ok {
+		log.Println("InitFrpArgs error")
 		return
 	}
-	// 第一次
+
+	ipCacheMu.Lock()
+	defer ipCacheMu.Unlock()
+
 	if ipCache == "" {
 		ipCache = ipTmp
 		StartFrpThings(oneJob)
-	} else {
-		// 非第一次
-		fmt.Println("Org IP:", ipCache)
-		fmt.Println("New IP:", ipTmp)
+		return
+	}
 
-		if ipTmp != ipCache {
-			// 重新启动 Frp
-			log.Printf("Close frp ...")
-			closeFrp(oneJob)
-			log.Printf("Close frp Done.")
+	log.Printf("IP check - Original: %s, New: %s", ipCache, ipTmp)
+	if ipTmp != ipCache {
+		log.Println("IP changed, restarting frp...")
 
-			ipCache = ipTmp
-
-			StartFrpThings(oneJob)
-		}
+		oneJobMu.Lock()
+		closeFrp(oneJob)
+		ipCache = ipTmp
+		StartFrpThings(oneJob)
+		oneJobMu.Unlock()
 	}
 }
 
 func RunTimer(vipConfig *viper.Viper) {
-	defer func() {
-		if oneJob.Running == true {
-			closeFrp(oneJob)
-		}
-
-		if err := recover(); err != nil {
-			fmt.Println(err)
-		}
-
-		log.Printf("Close Frp Done.")
-	}()
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
 
 	for {
-		RunOnce(vipConfig)
+		select {
+		case <-ticker.C:
+			RunOnce(vipConfig)
+		case <-shutdownCh:
+			done := make(chan struct{})
+			go func() {
+				oneJobMu.Lock()
+				defer oneJobMu.Unlock()
+				if oneJob.Running {
+					closeFrp(oneJob)
+				}
+				close(done)
+			}()
 
-		time.Sleep(time.Minute * time.Duration(5))
+			select {
+			case <-done:
+				log.Println("Graceful shutdown completed")
+			case <-time.After(30 * time.Second):
+				log.Println("WARNING: Force shutdown after timeout")
+			}
+			return
+		}
 	}
+}
+
+func startProxyServers(socksPort, httpPort int, user, pass string) {
+	if user == "" || pass == "" {
+		log.Println("Starting proxies without authentication")
+		startUnsecuredProxies(socksPort, httpPort)
+	} else {
+		log.Println("Starting proxies with authentication")
+		startSecuredProxies(socksPort, httpPort, user, pass)
+	}
+}
+
+func startUnsecuredProxies(socksPort, httpPort int) {
+	go func() {
+		server, err := socks5.New(&socks5.Config{})
+		if err != nil {
+			log.Fatalf("SOCKS5 server creation failed: %v", err)
+		}
+		log.Printf("SOCKS5 proxy listening on :%d", socksPort)
+		log.Fatal(server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", socksPort)))
+	}()
+
+	go func() {
+		proxy := goproxy.NewProxyHttpServer()
+		proxy.Verbose = true
+		log.Printf("HTTP proxy listening on :%d", httpPort)
+		log.Fatal(http.ListenAndServe(
+			fmt.Sprintf("0.0.0.0:%d", httpPort),
+			proxy,
+		))
+	}()
+}
+
+func startSecuredProxies(socksPort, httpPort int, user, pass string) {
+	go func() {
+		server, err := createSocks5Server(user, pass)
+		if err != nil {
+			log.Fatalf("SOCKS5 server creation failed: %v", err)
+		}
+		log.Printf("Authenticated SOCKS5 listening on :%d", socksPort)
+		log.Fatal(server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", socksPort)))
+	}()
+
+	go func() {
+		proxy := goproxy.NewProxyHttpServer()
+		proxy.Verbose = true
+		authHandler := authMiddleware(user, pass, proxy)
+
+		log.Printf("Authenticated HTTP proxy listening on :%d", httpPort)
+		log.Fatal(http.ListenAndServe(
+			fmt.Sprintf("0.0.0.0:%d", httpPort),
+			authHandler,
+		))
+	}()
 }
 
 func main() {
 	vipConfig, err := InitConfigure()
 	if err != nil {
-		log.Fatalln("InitConfigure:", err)
-		return
+		log.Fatalf("Configuration initialization failed: %v", err)
 	}
-
-	ipCache = ""
 
 	go RunTimer(vipConfig)
 
@@ -153,104 +210,13 @@ func main() {
 	proxyUser := vipConfig.GetString("ProxyUser")
 	proxyPass := vipConfig.GetString("ProxyPass")
 
-	// 检查是否配置了认证信息
-	if proxyUser == "" || proxyPass == "" {
-		// 开启 socks5 代理
-		go func() {
-			// Create a SOCKS5 server
-			conf := &socks5.Config{}
-			server, err := socks5.New(conf)
-			if err != nil {
-				panic(err)
-			}
-			println("Open socks5 Port At:", localSocks5Port)
-			// Create SOCKS5 proxy on localhost port 8000
-			if err = server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", localSocks5Port)); err != nil {
-				panic(err)
-			}
-		}()
-		// 开启 http 代理
-		go func() {
-			proxy := goproxy.NewProxyHttpServer()
-			proxy.Verbose = true
-			println("Open http Port At:", localProxyPort)
-			//为了防止阿里云检测海外主机是否有翻墙行为我们把服务开在127.0.0.1,这样外网是检测不到你开了 httpproxy 的
-			log.Fatal(http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", localProxyPort), proxy))
-		}()
+	startProxyServers(localSocks5Port, localProxyPort, proxyUser, proxyPass)
 
-		select {}
-	} else {
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-		// 开启 socks5 代理（带认证）
-		go func() {
-			server, err := createSocks5Server(proxyUser, proxyPass)
-			if err != nil {
-				panic(err)
-			}
-
-			log.Printf("SOCKS5 proxy with authentication enabled on :%d", localSocks5Port)
-			if err := server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", localSocks5Port)); err != nil {
-				panic(err)
-			}
-		}()
-
-		// 开启 http 代理（带认证）
-		go func() {
-			proxy := goproxy.NewProxyHttpServer()
-			proxy.Verbose = true
-
-			// 包装原始handler加入认证
-			authHandler := authMiddleware(proxyUser, proxyPass, proxy)
-
-			log.Printf("HTTP proxy with authentication enabled on :%d", localProxyPort)
-			log.Fatal(http.ListenAndServe(
-				fmt.Sprintf("0.0.0.0:%d", localProxyPort),
-				authHandler,
-			))
-		}()
-
-		select {}
-	}
+	<-sigCh
+	log.Println("Shutting down...")
+	close(shutdownCh)
+	time.Sleep(1 * time.Second) // 等待资源清理
 }
-
-//func main() {
-//
-//	// -------------------------------------------------------------
-//	// 加载配置
-//	vipConfig, err := InitConfigure()
-//	if err != nil {
-//		log.Fatalln("InitConfigure:", err)
-//		return
-//	}
-//
-//	ipCache = ""
-//
-//	go RunTimer(vipConfig)
-//
-//	localProxyPort := vipConfig.GetInt("LocalProxyPort")
-//	localSocks5Port := vipConfig.GetInt("LocalSocks5Port")
-//	// 开启 socks5 代理
-//	go func() {
-//		// Create a SOCKS5 server
-//		conf := &socks5.Config{}
-//		server, err := socks5.New(conf)
-//		if err != nil {
-//			panic(err)
-//		}
-//		println("Open socks5 Port At:", localSocks5Port)
-//		// Create SOCKS5 proxy on localhost port 8000
-//		if err = server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", localSocks5Port)); err != nil {
-//			panic(err)
-//		}
-//	}()
-//	// 开启 http 代理
-//	go func() {
-//		proxy := goproxy.NewProxyHttpServer()
-//		proxy.Verbose = true
-//		println("Open http Port At:", localProxyPort)
-//		//为了防止阿里云检测海外主机是否有翻墙行为我们把服务开在127.0.0.1,这样外网是检测不到你开了 httpproxy 的
-//		log.Fatal(http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", localProxyPort), proxy))
-//	}()
-//
-//	select {}
-//}

@@ -23,7 +23,7 @@ type OneJob struct {
 	CmdLine     string
 	CmdArgs     []string
 	Running     bool
-	mu          sync.Mutex         // 保护状态字段
+	mu          sync.Mutex         // 保护所有字段
 	retryTimer  *time.Timer        // 重试定时器
 	retryCancel context.CancelFunc // 取消重试
 }
@@ -49,34 +49,28 @@ func (j *OneJob) scheduleRetry() {
 
 	// 防止重复调度
 	if j.retryTimer != nil {
-		fmt.Println("已存在待处理的重试任务，取消原计划")
+		fmt.Println("取消现有重试任务")
 		j.retryCancel()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	j.retryCancel = cancel
 
-	fmt.Println("调度新的重试任务，3分钟后执行...")
+	fmt.Println("计划3分钟后重试...")
 	j.retryTimer = time.AfterFunc(3*time.Minute, func() {
-		select {
-		case <-ctx.Done():
-			fmt.Println("重试任务已被取消")
+		if ctx.Err() != nil {
+			fmt.Println("重试已取消")
 			return
-		default:
 		}
 
-		// 添加预检锁
 		j.mu.Lock()
 		defer j.mu.Unlock()
 
-		if !j.Running {
-			fmt.Println("执行预启动检查...")
-			if !FileExist(j.CmdLine) {
-				fmt.Printf("可执行文件不存在: %s\n", j.CmdLine)
-				return
-			}
-			fmt.Println("开始重试启动流程...")
+		if !j.Running && FileExist(j.CmdLine) {
+			fmt.Println("执行重试启动...")
 			StartFrpThings(j)
+		} else {
+			fmt.Println("跳过重试：进程正在运行或文件缺失")
 		}
 	})
 }
@@ -91,30 +85,21 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 	absPathFrp := nowDir + "frp"
 	absPathFrpIni := nowDir + "frp.ini"
 
-	switch runtime.GOOS {
-	case "darwin":
-		break
-	case "linux":
-		break
-	case "windows":
+	if runtime.GOOS == "windows" {
 		absPathFrp += ".exe"
 	}
 
 	if !FileExist(absPathFrp) {
-		fmt.Println(absPathFrp, " not exist.")
+		fmt.Println(absPathFrp, "不存在")
 		return false
 	}
 	if !FileExist(absPathFrpIni) {
-		fmt.Println(absPathFrpIni, " not exist.")
+		fmt.Println(absPathFrpIni, "不存在")
 		return false
 	}
 
 	oneJob.CmdLine = absPathFrp
-	oneJob.CmdArgs = []string{
-		"-c",
-		absPathFrpIni,
-	}
-
+	oneJob.CmdArgs = []string{"-c", absPathFrpIni}
 	return true
 }
 
@@ -123,22 +108,21 @@ func StartFrpThings(oneJob *OneJob) bool {
 		return false
 	}
 
-	fmt.Println("Start frp ...")
+	fmt.Println("启动FRP服务...")
 	startFrp(oneJob)
 	if oneJob.Err != nil {
-		fmt.Println("Start frp Error")
-		fmt.Println(oneJob.Err.Error())
-		oneJob.scheduleRetry() // 新增：启动失败时调度重试
+		fmt.Println("启动失败:", oneJob.Err)
+		oneJob.scheduleRetry()
 		return false
 	}
-	fmt.Println("Start frpc Done.")
+	fmt.Println("FRP服务启动成功")
 	return true
 }
 
 func closeFrp(oneJob *OneJob) bool {
-	fmt.Println("Close frpc ...")
+	fmt.Println("关闭FRP服务...")
 
-	// 取消重试调度
+	// 清理重试机制
 	oneJob.mu.Lock()
 	if oneJob.retryCancel != nil {
 		oneJob.retryCancel()
@@ -148,39 +132,45 @@ func closeFrp(oneJob *OneJob) bool {
 		oneJob.retryTimer.Stop()
 		oneJob.retryTimer = nil
 	}
+
+	// 获取当前状态
+	var cmder *exec.Cmd
+	var cancelFunc func()
+	if oneJob.Cmder != nil {
+		cmder = oneJob.Cmder
+	}
+	if oneJob.Cancel != nil {
+		cancelFunc = oneJob.Cancel
+	}
 	oneJob.mu.Unlock()
 
-	if oneJob.Cancel != nil {
-		oneJob.Cancel()
+	// 执行关闭操作
+	if cancelFunc != nil {
+		cancelFunc()
 	}
 
-	if oneJob.Cmder != nil && oneJob.Cmder.Process != nil {
-		if err := oneJob.Cmder.Process.Signal(os.Interrupt); err != nil {
-			fmt.Println("Failed to send interrupt signal:", err)
+	if cmder != nil && cmder.Process != nil {
+		fmt.Printf("终止进程 PID:%d\n", cmder.Process.Pid)
+		if err := cmder.Process.Signal(os.Interrupt); err != nil {
+			fmt.Println("发送中断信号失败:", err)
 		}
 
-		waitChan := make(chan error, 1)
+		// 异步等待终止
 		go func() {
-			waitChan <- oneJob.Cmder.Wait()
+			select {
+			case <-time.After(5 * time.Second):
+				if err := cmder.Process.Kill(); err != nil {
+					fmt.Println("强制终止失败:", err)
+				}
+			}
 		}()
-
-		select {
-		case <-time.After(5 * time.Second):
-			if err := oneJob.Cmder.Process.Kill(); err != nil {
-				fmt.Println("Failed to kill process:", err)
-			}
-		case err := <-waitChan:
-			if err != nil {
-				fmt.Println("Process exited with error:", err)
-			}
-		}
 	} else {
-		fmt.Println("No process to close")
+		fmt.Println("无运行中的进程")
 	}
 
 	killFrpProcesses()
 	oneJob.setRunning(false)
-	fmt.Println("Close frpc Done.")
+	fmt.Println("FRP服务关闭完成")
 	return true
 }
 
@@ -192,121 +182,105 @@ func killFrpProcesses() {
 	case "windows":
 		cmd = exec.Command("taskkill", "/F", "/IM", "frp.exe")
 	default:
-		fmt.Println("Unsupported OS")
+		fmt.Println("不支持的操作系统")
 		return
 	}
 
 	if err := cmd.Run(); err != nil {
-		fmt.Println("Cleanup error:", err)
-	} else {
-		fmt.Println("Cleanup completed")
+		fmt.Println("清理残留进程失败:", err)
 	}
 }
 
-// 修改startFrp函数中的命令执行部分
 func startFrp(oneJob *OneJob) {
+	oneJob.mu.Lock()
 	oneJob.Ctx, oneJob.Cancel = context.WithCancel(context.Background())
+	oneJob.mu.Unlock()
+
 	defer func() {
 		if oneJob.Err != nil {
-			oneJob.Cancel()
+			oneJob.mu.Lock()
+			if oneJob.Cancel != nil {
+				oneJob.Cancel()
+			}
+			oneJob.mu.Unlock()
 		}
 	}()
 
-	// 添加详细日志
-	fmt.Printf("Executing command: %s %v\n", oneJob.CmdLine, oneJob.CmdArgs)
-
+	oneJob.mu.Lock()
 	oneJob.Cmder = exec.CommandContext(oneJob.Ctx, oneJob.CmdLine, oneJob.CmdArgs...)
+	cmder := oneJob.Cmder
+	oneJob.mu.Unlock()
 
-	// 同时捕获标准错误
-	stdoutPipe, err := oneJob.Cmder.StdoutPipe()
+	stdout, err := cmder.StdoutPipe()
 	if err != nil {
-		fmt.Println("Stdout pipe error:", err)
 		oneJob.Err = err
-		oneJob.scheduleRetry()
+		fmt.Println("标准输出管道错误:", err)
 		return
 	}
-	stderrPipe, err := oneJob.Cmder.StderrPipe()
+
+	stderr, err := cmder.StderrPipe()
 	if err != nil {
-		fmt.Println("Stderr pipe error:", err)
 		oneJob.Err = err
-		oneJob.scheduleRetry()
+		fmt.Println("标准错误管道错误:", err)
 		return
 	}
 
 	// 添加启动时间记录
 	startTime := time.Now()
-
-	if err := oneJob.Cmder.Start(); err != nil {
-		fmt.Printf("启动失败 (耗时%s): %v\n", time.Since(startTime), err)
+	if err := cmder.Start(); err != nil {
 		oneJob.Err = err
-		oneJob.scheduleRetry()
+		fmt.Printf("启动失败 (耗时%s): %v\n", time.Since(startTime), err)
 		return
 	}
 
 	oneJob.setRunning(true)
-	fmt.Printf("进程已启动 PID:%d (耗时%s)\n", oneJob.Cmder.Process.Pid, time.Since(startTime))
+	fmt.Printf("进程已启动 PID:%d (耗时%s)\n", cmder.Process.Pid, time.Since(startTime))
 
-	// 统一输出处理
-	outputScanner := func(input io.Reader, name string) {
+	// 日志处理
+	scanOutput := func(input io.Reader, name string) {
 		scanner := bufio.NewScanner(input)
 		for scanner.Scan() {
-			output := scanner.Text()
-			fmt.Printf("[frp %s] %s\n", name, output)
-			if strings.Contains(output, "retry") || strings.Contains(output, "refused") || strings.Contains(output, "error") {
-				fmt.Println("检测到异常关键字，启动重置流程...")
+			line := scanner.Text()
+			fmt.Printf("[FRP-%s] %s\n", name, line)
+			if strings.Contains(line, "retry") || strings.Contains(line, "error") {
+				fmt.Println("检测到错误关键词，准备重试...")
 				oneJob.scheduleRetry()
 			}
 		}
-		if err := scanner.Err(); err != nil {
-			fmt.Printf("%s扫描错误: %v\n", name, err)
-		}
 	}
 
-	// 并行处理输出流
-	go outputScanner(stdoutPipe, "stdout")
-	go outputScanner(stderrPipe, "stderr")
+	go scanOutput(stdout, "stdout")
+	go scanOutput(stderr, "stderr")
 
-	// 优化等待逻辑
+	// 进程监控
 	go func() {
-		err := oneJob.Cmder.Wait()
-		runDuration := time.Since(startTime)
+		err := cmder.Wait()
+		duration := time.Since(startTime)
 
 		oneJob.mu.Lock()
 		defer oneJob.mu.Unlock()
 
-		// 状态转换前检查
-		if !oneJob.Running {
-			fmt.Printf("进程状态不一致，已处于停止状态 (运行时长%s)\n", runDuration)
-			return
-		}
+		oneJob.Running = false
+		oneJob.Cmder = nil // 清除已完成的命令
 
-		// 记录退出信息
-		exitCode := 0
 		if err != nil {
+			exitCode := 0
 			var exitErr *exec.ExitError
 			if errors.As(err, &exitErr) {
 				exitCode = exitErr.ExitCode()
 			}
-			fmt.Printf("进程异常退出 (code:%d 时长%s): %v\n", exitCode, runDuration, err)
+			fmt.Printf("进程异常退出 (code:%d 时长%s): %v\n", exitCode, duration, err)
+			if duration < 5*time.Second {
+				fmt.Println("短期异常退出，触发重试")
+				oneJob.scheduleRetry()
+			}
 		} else {
-			fmt.Printf("进程正常退出 (运行时长%s)\n", runDuration)
-		}
-
-		// 状态重置和重试调度
-		oneJob.Running = false
-		oneJob.Cmder = nil
-
-		// 仅当运行时间小于5秒时视为异常退出需要重试
-		if runDuration < 5*time.Second {
-			fmt.Println("检测到短期异常退出，触发重试机制")
-			oneJob.scheduleRetry()
-		} else {
-			fmt.Println("进程已完成正常生命周期，无需重试")
+			fmt.Printf("进程正常退出 (运行时长%s)\n", duration)
 		}
 	}()
 }
 
-// GetIP 函数保持原样
+// GetIP 函数保持不变
 func GetIP(domainName string, dnsAddress string) (string, error) {
 	resolver := &net.Resolver{
 		PreferGo: true,
