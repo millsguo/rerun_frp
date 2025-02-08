@@ -1,13 +1,15 @@
 # rerun_frp
-本项目fork自github.com/allanpk716/rerun_frp，感谢所有的贡献者
+本项目fork自 https://github.com/allanpk716/rerun_frp ，感谢allanpk716
 
-本项目的目标是检测某一个域名的 IP 是否标动，然后重启 frp 以重新连接。如果目标断开，系统会在3分钟后自动重连，同时会检测目标域名IP是否变化
+检测某一个域名的 IP 是否变动，然后重启 frp 以重新连接。如果目标断开，系统会在3分钟后自动重连，同时会检测目标域名IP是否变化
 
 同时开启本地的 http、socks5 代理，本地代理支持用户认证，需要用户名/密码
 
 ## How to use
 
-docker 的设置如下
+本程序运行在服务器上，由外网的服务器主动连接家里NAS上的frps
+
+NAS上的frps可以使用docker部署 ，docker 的设置如下
 
 设置网络位 Host
 
@@ -16,17 +18,18 @@ docker 的设置如下
 | /your/rerun_frp/config.yaml | /app/config.yaml  |
 | /your/rerun_frp/frpThings   | /app/frpThings    |
 
+下面的配置为服务器上运行rerun_frp程序的配置文件
 ### config.yaml 
 
 内容如下
 
 ```yaml
-CheckDomainName : google.com
-DnsAddress: 8.8.8.8
-LocalProxyPort: 5269
-LocalSocks5Port: 5270
-ProxyUser: username
-ProxyPass: password
+CheckDomainName : google.com #NAS的DDNS域名
+DnsAddress: 8.8.8.8 #DNS服务器
+LocalProxyPort: 5269 # 本地代理的端口
+LocalSocks5Port: 5270 # 本地socks5代理的端口
+ProxyUser: username # 本地代理的用户名，删除这二行，则代理不需要认证
+ProxyPass: password # 本地代理的密码，删除这二行，则代理不需要认证
 ```
 
 ### frpThings
@@ -36,4 +39,24 @@ ProxyPass: password
 * frp
 * frp.ini
 
-一个是 frpc 主程序，一个是它的配置文件，怎么用建议看 frp 官网。
+```
+[common]
+server_addr = 你的NAS的外网IP或域名
+server_port = 7000 # frps的端口
+token = # frps的token
+tls_enable = true
+
+[HTTP]
+type = tcp
+local_ip = 127.0.0.1
+local_port = 5269 # 本地代理的端口
+remote_port = 5271 # frps的端口
+
+[SOCKS5]
+type = tcp
+local_ip = 127.0.0.1
+local_port = 5270 # 本地代理的端口
+remote_port = 5272 # frps的端口
+```
+frp 是 frpc 主程序，将frpc文件改名为 frp
+frp.ini 是frpc的配置文件，具体参数建议看 frp 官网
