@@ -1,5 +1,5 @@
 # rerun_frp
-本项目fork自 https://github.com/allanpk716/rerun_frp ，感谢allanpk716
+本项目fork自 https://github.com/allanpk716/rerun_frp ，感谢 @allanpk716
 
 检测某一个域名的 IP 是否变动，然后重启 frp 以重新连接。如果目标断开，系统会在3分钟后自动重连，同时会检测目标域名IP是否变化
 
