@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -236,6 +237,14 @@ func RunTimer(vipConfig *viper.Viper) {
 }
 
 func startProxyServers(socksPort, httpPort int, user, pass string) {
+	// 获取调用者的信息
+	pc, file, line, ok := runtime.Caller(1)
+	if ok {
+		funcDetails := runtime.FuncForPC(pc)
+		logf("Called from %s in file %s at line %d\n", funcDetails.Name(), file, line)
+	} else {
+		logf("Could not retrieve caller information")
+	}
 	if user == "" || pass == "" {
 		logf("启动无认证代理服务")
 		startUnsecuredProxies(socksPort, httpPort)
