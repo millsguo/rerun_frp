@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"os"
@@ -49,17 +48,17 @@ func (j *OneJob) scheduleRetry() {
 
 	// 防止重复调度
 	if j.retryTimer != nil {
-		fmt.Println("取消现有重试任务")
+		logf("取消现有重试任务")
 		j.retryCancel()
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	j.retryCancel = cancel
 
-	fmt.Println("计划3分钟后重试...")
+	logf("计划3分钟后重试...")
 	j.retryTimer = time.AfterFunc(3*time.Minute, func() {
 		if ctx.Err() != nil {
-			fmt.Println("重试已取消")
+			logf("重试已取消")
 			return
 		}
 
@@ -67,10 +66,10 @@ func (j *OneJob) scheduleRetry() {
 		defer j.mu.Unlock()
 
 		if !j.Running && FileExist(j.CmdLine) {
-			fmt.Println("执行重试启动...")
+			logf("执行重试启动...")
 			StartFrpThings(j)
 		} else {
-			fmt.Println("跳过重试：进程正在运行或文件缺失")
+			logf("跳过重试：进程正在运行或文件缺失")
 		}
 	})
 }
@@ -90,11 +89,11 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 	}
 
 	if !FileExist(absPathFrp) {
-		fmt.Println(absPathFrp, "不存在")
+		logf(absPathFrp, "不存在")
 		return false
 	}
 	if !FileExist(absPathFrpIni) {
-		fmt.Println(absPathFrpIni, "不存在")
+		logf(absPathFrpIni, "不存在")
 		return false
 	}
 
@@ -108,19 +107,19 @@ func StartFrpThings(oneJob *OneJob) bool {
 		return false
 	}
 
-	fmt.Println("启动FRP服务...")
+	logf("启动FRP服务...")
 	startFrp(oneJob)
 	if oneJob.Err != nil {
-		fmt.Println("启动失败:", oneJob.Err)
+		logf("启动失败:%v", oneJob.Err)
 		oneJob.scheduleRetry()
 		return false
 	}
-	fmt.Println("FRP服务启动成功")
+	logf("FRP服务启动成功")
 	return true
 }
 
 func closeFrp(oneJob *OneJob) bool {
-	fmt.Println("关闭FRP服务...")
+	logf("关闭FRP服务...")
 
 	// 清理重试机制
 	oneJob.mu.Lock()
@@ -150,9 +149,9 @@ func closeFrp(oneJob *OneJob) bool {
 	}
 
 	if cmder != nil && cmder.Process != nil {
-		fmt.Printf("终止进程 PID:%d\n", cmder.Process.Pid)
+		logf("终止进程 PID:%d\n", cmder.Process.Pid)
 		if err := cmder.Process.Signal(os.Interrupt); err != nil {
-			fmt.Println("发送中断信号失败:", err)
+			logf("发送中断信号失败:%v", err)
 		}
 
 		// 异步等待终止
@@ -160,17 +159,17 @@ func closeFrp(oneJob *OneJob) bool {
 			select {
 			case <-time.After(5 * time.Second):
 				if err := cmder.Process.Kill(); err != nil {
-					fmt.Println("强制终止失败:", err)
+					logf("强制终止失败:%v", err)
 				}
 			}
 		}()
 	} else {
-		fmt.Println("无运行中的进程")
+		logf("无运行中的进程")
 	}
 
 	killFrpProcesses()
 	oneJob.setRunning(false)
-	fmt.Println("FRP服务关闭完成")
+	logf("FRP服务关闭完成")
 	return true
 }
 
@@ -182,12 +181,12 @@ func killFrpProcesses() {
 	case "windows":
 		cmd = exec.Command("taskkill", "/F", "/IM", "frp.exe")
 	default:
-		fmt.Println("不支持的操作系统")
+		logf("不支持的操作系统")
 		return
 	}
 
 	if err := cmd.Run(); err != nil {
-		fmt.Println("清理残留进程失败:", err)
+		logf("清理残留进程失败:%v", err)
 	}
 }
 
@@ -214,14 +213,14 @@ func startFrp(oneJob *OneJob) {
 	stdout, err := cmder.StdoutPipe()
 	if err != nil {
 		oneJob.Err = err
-		fmt.Println("标准输出管道错误:", err)
+		logf("标准输出管道错误:%v", err)
 		return
 	}
 
 	stderr, err := cmder.StderrPipe()
 	if err != nil {
 		oneJob.Err = err
-		fmt.Println("标准错误管道错误:", err)
+		logf("标准错误管道错误:%v", err)
 		return
 	}
 
@@ -229,21 +228,21 @@ func startFrp(oneJob *OneJob) {
 	startTime := time.Now()
 	if err := cmder.Start(); err != nil {
 		oneJob.Err = err
-		fmt.Printf("启动失败 (耗时%s): %v\n", time.Since(startTime), err)
+		logf("启动失败 (耗时%s): %v\n", time.Since(startTime), err)
 		return
 	}
 
 	oneJob.setRunning(true)
-	fmt.Printf("进程已启动 PID:%d (耗时%s)\n", cmder.Process.Pid, time.Since(startTime))
+	logf("进程已启动 PID:%d (耗时%s)\n", cmder.Process.Pid, time.Since(startTime))
 
 	// 日志处理
 	scanOutput := func(input io.Reader, name string) {
 		scanner := bufio.NewScanner(input)
 		for scanner.Scan() {
 			line := scanner.Text()
-			fmt.Printf("[FRP-%s] %s\n", name, line)
+			logf("[FRP-%s] %s\n", name, line)
 			if strings.Contains(line, "retry") || strings.Contains(line, "error") {
-				fmt.Println("检测到错误关键词，准备重试...")
+				logf("检测到错误关键词，准备重试...")
 				oneJob.scheduleRetry()
 			}
 		}
@@ -269,13 +268,13 @@ func startFrp(oneJob *OneJob) {
 			if errors.As(err, &exitErr) {
 				exitCode = exitErr.ExitCode()
 			}
-			fmt.Printf("进程异常退出 (code:%d 时长%s): %v\n", exitCode, duration, err)
+			logf("进程异常退出 (code:%d 时长%s): %v\n", exitCode, duration, err)
 			if duration < 5*time.Second {
-				fmt.Println("短期异常退出，触发重试")
+				logf("短期异常退出，触发重试")
 				oneJob.scheduleRetry()
 			}
 		} else {
-			fmt.Printf("进程正常退出 (运行时长%s)\n", duration)
+			logf("进程正常退出 (运行时长%s)\n", duration)
 		}
 	}()
 }
@@ -321,9 +320,9 @@ func GetIP(domainName string, dnsAddress string) (string, error) {
 
 	// 增强调试信息
 	if len(ipv4Address) > 1 {
-		fmt.Printf("Resolved multiple IPv4 addresses: %v\n", ipv4Address)
+		logf("Resolved multiple IPv4 addresses: %v\n", ipv4Address)
 	}
-	fmt.Printf("Final selected IPv4: [%s]\n", result)
+	logf("Final selected IPv4: [%s]\n", result)
 
 	return result, nil
 }

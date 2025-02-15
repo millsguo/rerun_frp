@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,6 +17,97 @@ import (
 	"github.com/elazarl/goproxy"
 	"github.com/spf13/viper"
 )
+
+// 新增端口检查函数
+func isPortAvailable(port int) bool {
+	address := fmt.Sprintf(":%d", port)
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return false
+	}
+	defer func(listener net.Listener) {
+		err := listener.Close()
+		if err != nil {
+			return
+		}
+	}(listener)
+	return true
+}
+
+// 全局日志变量
+var (
+	logMu          sync.Mutex
+	logFile        *os.File
+	currentLogDate string
+)
+
+// 初始化日志系统
+func init() {
+	if err := os.MkdirAll("./log", 0755); err != nil {
+		panic(fmt.Sprintf("创建日志目录失败: %v", err))
+	}
+	updateLogFile()
+}
+
+func updateLogFile() {
+	now := time.Now()
+	today := now.Format("20060102")
+
+	logMu.Lock()
+	defer logMu.Unlock()
+
+	if currentLogDate == today && logFile != nil {
+		return
+	}
+
+	// 关闭旧文件
+	if logFile != nil {
+		err := logFile.Close()
+		if err != nil {
+			return
+		}
+	}
+
+	// 创建新文件
+	filename := fmt.Sprintf("./log/log-%s.log", today)
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		panic(fmt.Sprintf("打开日志文件失败: %v", err))
+	}
+
+	logFile = file
+	currentLogDate = today
+}
+
+func logMessage(msg string) {
+	logMu.Lock()
+	defer logMu.Unlock()
+
+	// 再次检查日期防止其他goroutine已经更新
+	now := time.Now()
+	today := now.Format("20060102")
+	if currentLogDate != today {
+		updateLogFile()
+	}
+
+	// 格式化日志条目
+	logEntry := fmt.Sprintf("%s %s\n", now.Format("2006-01-02 15:04:05"), msg)
+
+	// 写入文件
+	if _, err := logFile.WriteString(logEntry); err != nil {
+		_, err := fmt.Fprintf(os.Stderr, "写入日志失败: %v\n", err)
+		if err != nil {
+			return
+		}
+	}
+
+	// 同时输出到控制台
+	fmt.Print(logEntry)
+}
+
+func logf(format string, args ...interface{}) {
+	logMessage(fmt.Sprintf(format, args...))
+}
 
 var (
 	ipCache    string
@@ -82,13 +174,13 @@ func RunOnce(vipConfig *viper.Viper) {
 
 	ipTmp, err := GetIP(domainName, dnsAddress)
 	if err != nil {
-		log.Printf("GetIP error: %v", err)
+		logf("获取远程IP失败，错误信息: %v", err)
 		return
 	}
 
 	nowDir, _ := os.Getwd()
 	if ok := InitFrpArgs(nowDir, oneJob); !ok {
-		log.Println("InitFrpArgs error")
+		logf("Frp初始化失败")
 		return
 	}
 
@@ -101,9 +193,9 @@ func RunOnce(vipConfig *viper.Viper) {
 		return
 	}
 
-	log.Printf("IP check - Original: %s, New: %s", ipCache, ipTmp)
+	logf("IP 检查 - 原IP: %s, 新IP: %s", ipCache, ipTmp)
 	if ipTmp != ipCache {
-		log.Println("IP changed, restarting frp...")
+		logf("IP 已改变, 重启FRP服务中...")
 
 		oneJobMu.Lock()
 		closeFrp(oneJob)
@@ -134,9 +226,9 @@ func RunTimer(vipConfig *viper.Viper) {
 
 			select {
 			case <-done:
-				log.Println("Graceful shutdown completed")
+				logf("正常退出程序")
 			case <-time.After(30 * time.Second):
-				log.Println("WARNING: Force shutdown after timeout")
+				logf("警告：30秒后强制退出")
 			}
 			return
 		}
@@ -145,28 +237,36 @@ func RunTimer(vipConfig *viper.Viper) {
 
 func startProxyServers(socksPort, httpPort int, user, pass string) {
 	if user == "" || pass == "" {
-		log.Println("Starting proxies without authentication")
+		logf("启动无认证代理服务")
 		startUnsecuredProxies(socksPort, httpPort)
 	} else {
-		log.Println("Starting proxies with authentication")
+		logf("启动认证代理服务")
 		startSecuredProxies(socksPort, httpPort, user, pass)
 	}
 }
 
 func startUnsecuredProxies(socksPort, httpPort int) {
 	go func() {
+		if !isPortAvailable(socksPort) {
+			logf("SOCKS5端口 %d 已被占用，跳过启动", socksPort)
+			return
+		}
 		server, err := socks5.New(&socks5.Config{})
 		if err != nil {
-			log.Fatalf("SOCKS5 server creation failed: %v", err)
+			log.Fatalf("SOCKS5 代理服务启动失败: %v", err)
 		}
-		log.Printf("SOCKS5 proxy listening on :%d", socksPort)
+		logf("SOCKS5 简单代理服务启动成功，监听端口 :%d", socksPort)
 		log.Fatal(server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", socksPort)))
 	}()
 
 	go func() {
+		if !isPortAvailable(httpPort) {
+			logf("HTTP端口 %d 已被占用，跳过启动", httpPort)
+			return
+		}
 		proxy := goproxy.NewProxyHttpServer()
 		proxy.Verbose = true
-		log.Printf("HTTP proxy listening on :%d", httpPort)
+		logf("HTTP 简单代理服务启动成功，监听端口 :%d", httpPort)
 		log.Fatal(http.ListenAndServe(
 			fmt.Sprintf("0.0.0.0:%d", httpPort),
 			proxy,
@@ -176,20 +276,28 @@ func startUnsecuredProxies(socksPort, httpPort int) {
 
 func startSecuredProxies(socksPort, httpPort int, user, pass string) {
 	go func() {
+		if !isPortAvailable(socksPort) {
+			logf("SOCKS5端口 %d 已被占用，跳过启动", socksPort)
+			return
+		}
 		server, err := createSocks5Server(user, pass)
 		if err != nil {
-			log.Fatalf("SOCKS5 server creation failed: %v", err)
+			log.Fatalf("SOCKS5 认证代理服务启动失败: %v", err)
 		}
-		log.Printf("Authenticated SOCKS5 listening on :%d", socksPort)
+		logf("认证 SOCKS5 代理服务启动成功，监听端口 :%d", socksPort)
 		log.Fatal(server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", socksPort)))
 	}()
 
 	go func() {
+		if !isPortAvailable(httpPort) {
+			logf("HTTP端口 %d 已被占用，跳过启动", httpPort)
+			return
+		}
 		proxy := goproxy.NewProxyHttpServer()
 		proxy.Verbose = true
 		authHandler := authMiddleware(user, pass, proxy)
 
-		log.Printf("Authenticated HTTP proxy listening on :%d", httpPort)
+		logf("认证 HTTP 代理服务启动成功，监听端口 :%d", httpPort)
 		log.Fatal(http.ListenAndServe(
 			fmt.Sprintf("0.0.0.0:%d", httpPort),
 			authHandler,
@@ -200,7 +308,7 @@ func startSecuredProxies(socksPort, httpPort int, user, pass string) {
 func main() {
 	vipConfig, err := InitConfigure()
 	if err != nil {
-		log.Fatalf("Configuration initialization failed: %v", err)
+		log.Fatalf("配置文件初始化失败: %v", err)
 	}
 
 	go RunTimer(vipConfig)
@@ -216,7 +324,7 @@ func main() {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
 	<-sigCh
-	log.Println("Shutting down...")
+	logf("退出程序...")
 	close(shutdownCh)
 	time.Sleep(1 * time.Second) // 等待资源清理
 }
