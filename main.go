@@ -193,18 +193,26 @@ func createSocks5Server(user, pass string) (*socks5.Server, error) {
 }
 
 func RunOnce(vipConfig *viper.Viper) {
+	logf("开始执行FRP服务检查流程")
+
 	domainName := vipConfig.GetString("CheckDomainName")
 	dnsAddress := vipConfig.GetString("DnsAddress")
+	logf("配置参数 - Domain: %s, DNS: %s", domainName, dnsAddress)
 
 	ipTmp, err := GetIP(domainName, dnsAddress)
 	if err != nil {
 		logf("获取远程IP失败，错误信息: %v", err)
 		return
 	}
+	logf("成功获取IP: %s", ipTmp)
 
 	nowDir, _ := os.Getwd()
+	logf("当前工作目录: %s", nowDir)
 	if ok := InitFrpArgs(nowDir, oneJob); !ok {
-		logf("Frp初始化失败")
+		logf("Frp初始化失败，请检查以下内容：")
+		logf("1. frpc/frps可执行文件是否存在")
+		logf("2. 配置文件模板是否完整")
+		logf("3. 文件权限是否正确")
 		return
 	}
 
@@ -217,7 +225,6 @@ func RunOnce(vipConfig *viper.Viper) {
 		return
 	}
 
-	logf("IP 检查 - 原IP: %s, 新IP: %s", ipCache, ipTmp)
 	if ipTmp != ipCache {
 		logf("IP 已改变, 重启FRP服务中...")
 

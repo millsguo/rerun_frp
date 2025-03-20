@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -80,9 +81,25 @@ func FileExist(path string) bool {
 }
 
 func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
-	nowDir = nowDir + string(os.PathSeparator) + "frpThings" + string(os.PathSeparator)
-	absPathFrp := nowDir + "frp"
-	absPathFrpIni := nowDir + "frp.ini"
+	// 添加路径验证
+	frpBinPath := filepath.Join(nowDir, "frpc") // 或 frps
+	if _, err := os.Stat(frpBinPath); os.IsNotExist(err) {
+		logf("FRP可执行文件不存在于: %s", frpBinPath)
+		return false
+	}
+	logf("FRP可执行文件路径: %s", frpBinPath)
+
+	// 验证配置文件生成逻辑
+	configPath := filepath.Join(nowDir, "frpc.ini")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		logf("配置文件生成失败，路径: %s", configPath)
+		return false
+	}
+	logf("配置文件路径: %s", configPath)
+
+	nowDir = nowDir + string(os.PathSeparator) + "frpClient" + string(os.PathSeparator)
+	absPathFrp := nowDir + "frpc"
+	absPathFrpIni := nowDir + "frpc.ini"
 
 	if runtime.GOOS == "windows" {
 		absPathFrp += ".exe"
@@ -99,6 +116,8 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 
 	oneJob.CmdLine = absPathFrp
 	oneJob.CmdArgs = []string{"-c", absPathFrpIni}
+	logf("FRP可执行文件路径: %s", absPathFrp)
+	logf("命令执行成功：%s", oneJob.CmdLine)
 	return true
 }
 
@@ -320,9 +339,9 @@ func GetIP(domainName string, dnsAddress string) (string, error) {
 
 	// 增强调试信息
 	if len(ipv4Address) > 1 {
-		logf("Resolved multiple IPv4 addresses: %v\n", ipv4Address)
+		logf("发现多个IP地址: %v\n", ipv4Address)
 	}
-	logf("Final selected IPv4: [%s]\n", result)
+	logf("解析地址 IPv4: [%s]\n", result)
 
 	return result, nil
 }

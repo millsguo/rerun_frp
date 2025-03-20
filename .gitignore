@@ -1,3 +1,6 @@
 /config.yaml
 /.idea
 /rerun_frp.exe
+/frpThings/
+/build
+/buildLinuxX86.sh
