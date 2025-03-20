@@ -82,20 +82,20 @@ func FileExist(path string) bool {
 
 func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 	// 添加路径验证
-	frpBinPath := filepath.Join(nowDir, "frpc") // 或 frps
+	frpBinPath := filepath.Join(nowDir, "/frpClient/frpc") // 或 frps
 	if _, err := os.Stat(frpBinPath); os.IsNotExist(err) {
 		logf("FRP可执行文件不存在于: %s", frpBinPath)
 		return false
 	}
-	logf("FRP可执行文件路径: %s", frpBinPath)
+	//logf("FRP可执行文件路径: %s", frpBinPath)
 
 	// 验证配置文件生成逻辑
-	configPath := filepath.Join(nowDir, "frpc.ini")
+	configPath := filepath.Join(nowDir, "/frpClient/frpc.ini")
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		logf("配置文件生成失败，路径: %s", configPath)
 		return false
 	}
-	logf("配置文件路径: %s", configPath)
+	//logf("配置文件路径: %s", configPath)
 
 	nowDir = nowDir + string(os.PathSeparator) + "frpClient" + string(os.PathSeparator)
 	absPathFrp := nowDir + "frpc"
@@ -116,8 +116,8 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 
 	oneJob.CmdLine = absPathFrp
 	oneJob.CmdArgs = []string{"-c", absPathFrpIni}
-	logf("FRP可执行文件路径: %s", absPathFrp)
-	logf("命令执行成功：%s", oneJob.CmdLine)
+	//logf("FRP可执行文件路径: %s", absPathFrp)
+	//logf("命令执行成功：%s", oneJob.CmdLine)
 	return true
 }
 
@@ -341,7 +341,7 @@ func GetIP(domainName string, dnsAddress string) (string, error) {
 	if len(ipv4Address) > 1 {
 		logf("发现多个IP地址: %v\n", ipv4Address)
 	}
-	logf("解析地址 IPv4: [%s]\n", result)
+	//logf("解析地址 IPv4: [%s]\n", result)
 
 	return result, nil
 }
