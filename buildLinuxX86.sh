@@ -15,3 +15,5 @@ go build -o "${output_file}"
 
 # 打印生成的文件名（可选）
 echo "Build output: ${output_file}"
+
+scp "${output_file}" root@proxy.ydy.plus:/data/rerun_frp/

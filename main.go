@@ -47,15 +47,38 @@ func init() {
 	if err := os.MkdirAll("./log", 0755); err != nil {
 		panic(fmt.Sprintf("创建日志目录失败: %v", err))
 	}
+	logMu.Lock() // 新增锁
 	updateLogFile()
+	logMu.Unlock()
+
+	// 添加定时器（在初始化最后添加）
+	go func() {
+		for {
+			now := time.Now().Local()
+			// 计算下一个本地时间的零点
+			next := now.Truncate(24 * time.Hour).Add(24 * time.Hour)
+			time.Sleep(next.Sub(now))
+
+			logMu.Lock()
+			updateLogFile() // 确保该函数已移除锁操作
+			logMu.Unlock()
+
+			// 添加容错机制
+			logf("已执行每日日志文件切换")
+		}
+	}()
 }
 
 func updateLogFile() {
+	// 创建日志目录
+	if _, err := os.Stat("./log"); os.IsNotExist(err) {
+		if err := os.MkdirAll("./log", 0755); err != nil {
+			panic(fmt.Sprintf("紧急创建日志目录失败: %v", err))
+		}
+	}
+
 	now := time.Now()
 	today := now.Format("20060102")
-
-	logMu.Lock()
-	defer logMu.Unlock()
 
 	if currentLogDate == today && logFile != nil {
 		return
