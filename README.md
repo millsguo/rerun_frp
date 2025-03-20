@@ -14,9 +14,9 @@ NAS上的frps可以使用docker部署 ，docker 的设置如下
 设置网络位 Host
 
 | Host/volume                 | Path in container |
-| :-------------------------- | :---------------- |
+|:----------------------------|:------------------|
 | /your/rerun_frp/config.yaml | /app/config.yaml  |
-| /your/rerun_frp/frpThings   | /app/frpThings    |
+| /your/rerun_frp/frpClient   | /app/frpClient    |
 
 下面的配置为服务器上运行rerun_frp程序的配置文件
 ### config.yaml 
@@ -32,12 +32,12 @@ ProxyUser: username # 本地代理的用户名，删除这二行，则代理不�
 ProxyPass: password # 本地代理的密码，删除这二行，则代理不需要认证
 ```
 
-### frpThings
+### frpClient
 
 这个是文件夹，里面有至少两个文件(**注意他们的命名**)
 
-* frp
-* frp.ini
+* frpc
+* frpc.ini
 
 ```
 [common]
@@ -58,5 +58,5 @@ local_ip = 127.0.0.1
 local_port = 5270 # 本地代理的端口
 remote_port = 5272 # frps的端口
 ```
-frp 是 frpc 主程序，将frpc文件改名为 frp
-frp.ini 是frpc的配置文件，具体参数建议看 frp 官网
+frpc 是 frp 客户端程序
+frpc.ini 是frpc的配置文件，具体参数建议看 frp 官网
