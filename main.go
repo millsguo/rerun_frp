@@ -221,7 +221,7 @@ func RunOnce(vipConfig *viper.Viper) {
 
 	if ipCache == "" {
 		ipCache = ipTmp
-		StartFrpThings(oneJob)
+		StartFrpThings(oneJob, vipConfig)
 		return
 	}
 
@@ -231,7 +231,7 @@ func RunOnce(vipConfig *viper.Viper) {
 		oneJobMu.Lock()
 		closeFrp(oneJob)
 		ipCache = ipTmp
-		StartFrpThings(oneJob)
+		StartFrpThings(oneJob, vipConfig)
 		oneJobMu.Unlock()
 	}
 }
