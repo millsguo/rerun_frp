@@ -6,3 +6,4 @@
 /buildLinuxX86.sh
 /frpClient/frpc.ini
 /frpClient/frpc.yaml
+/frpClient/frpc.toml

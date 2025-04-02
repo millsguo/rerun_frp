@@ -149,7 +149,7 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 	//logf("FRP可执行文件路径: %s", frpBinPath)
 
 	// 验证配置文件生成逻辑
-	configPath := filepath.Join(nowDir, "/frpClient/frpc.yaml")
+	configPath := filepath.Join(nowDir, "/frpClient/frpc.toml")
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		logf("配置文件生成失败，路径: %s", configPath)
 		return false
