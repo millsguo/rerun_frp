@@ -154,31 +154,26 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 		logf("配置文件生成失败，路径: %s", configPath)
 		return false
 	}
-	//logf("配置文件路径: %s", configPath)
-
-	nowDir = nowDir + string(os.PathSeparator) + "frpClient" + string(os.PathSeparator)
-	absPathFrp := nowDir + "frpc"
-	absPathFrpIni := nowDir + "frpc.ini"
 
 	if runtime.GOOS == "windows" {
-		absPathFrp += ".exe"
+		frpBinPath += ".exe"
 	}
 
-	if !FileExist(absPathFrp) {
-		logf(absPathFrp, "不存在")
+	if !FileExist(frpBinPath) {
+		logf(frpBinPath, "不存在")
 		return false
 	}
-	if !FileExist(absPathFrpIni) {
-		logf(absPathFrpIni, "不存在")
+	if !FileExist(configPath) {
+		logf(configPath, "不存在")
 		return false
 	}
 
-	oneJob.CmdLine = absPathFrp
-	oneJob.CmdArgs = []string{"-c", absPathFrpIni}
+	oneJob.CmdLine = frpBinPath
+	oneJob.CmdArgs = []string{"-c", configPath}
 
 	// 返回前添加权限检查
 	if runtime.GOOS != "windows" {
-		if fi, err := os.Stat(absPathFrp); err == nil {
+		if fi, err := os.Stat(frpBinPath); err == nil {
 			logf("文件权限: %#o", fi.Mode().Perm())
 		}
 	}
