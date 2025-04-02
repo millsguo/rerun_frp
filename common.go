@@ -300,8 +300,7 @@ func killFrpProcesses() {
 }
 
 func startFrp(oneJob *OneJob) {
-	logf("启动参数验证: %s %v", oneJob.CmdLine, oneJob.CmdArgs)
-
+	//logf("启动参数验证: %s %v", oneJob.CmdLine, oneJob.CmdArgs)
 	oneJob.mu.Lock()
 	oneJob.retryCount = 0
 	oneJob.maxAllowedRetries = 0
