@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -29,7 +30,6 @@ type OneJob struct {
 	retryTimer        *time.Timer        // 重试定时器
 	retryCancel       context.CancelFunc // 取消重试
 	vipConfig         *viper.Viper       // 新增配置引用
-	lastActive        time.Time
 	retryCount        int
 	maxAllowedRetries int // 记录当前最大允许值
 }
@@ -149,7 +149,7 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 	//logf("FRP可执行文件路径: %s", frpBinPath)
 
 	// 验证配置文件生成逻辑
-	configPath := filepath.Join(nowDir, "/frpClient/frpc.ini")
+	configPath := filepath.Join(nowDir, "/frpClient/frpc.yaml")
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		logf("配置文件生成失败，路径: %s", configPath)
 		return false
@@ -172,8 +172,6 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 		logf(absPathFrpIni, "不存在")
 		return false
 	}
-	configContent, _ := os.ReadFile(absPathFrpIni)
-	logf("配置文件内容:\n%s", string(configContent))
 
 	oneJob.CmdLine = absPathFrp
 	oneJob.CmdArgs = []string{"-c", absPathFrpIni}
@@ -356,7 +354,6 @@ func startFrp(oneJob *OneJob) {
 		logf("启动失败 (耗时%s): %v\n", time.Since(startTime), err)
 		return
 	}
-	oneJob.lastActive = startTime
 
 	oneJob.setRunning(true)
 	logf("进程已启动 PID:%d (耗时%s)\n", cmder.Process.Pid, time.Since(startTime))
@@ -438,23 +435,61 @@ func (j *OneJob) healthCheck() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
-	logf("当前重试状态: %d/%d", j.retryCount, j.maxAllowedRetries)
 	for {
 		select {
 		case <-ticker.C:
-			j.mu.Lock()
-			if time.Since(j.lastActive) > 5*time.Minute {
-				logf("检测到进程僵死，触发重启")
-				j.mu.Unlock()
-				closeFrp(j)
-				j.scheduleRetry()
+			oneJobMu.Lock()
+			// 双重检查运行状态
+			if !j.Running {
+				oneJobMu.Unlock()
 				return
 			}
-			j.mu.Unlock()
+
+			// 检查进程状态
+			alive := j.isProcessAlive()
+			if !alive {
+				logf("健康检查：进程已停止，触发重启")
+				closeFrp(j)
+				j.scheduleRetry()
+				oneJobMu.Unlock()
+				return
+			}
+			oneJobMu.Unlock()
+
 		case <-j.Ctx.Done():
 			return
 		}
 	}
+}
+
+// 新增进程状态检查方法
+func (j *OneJob) isProcessAlive() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	if j.Cmder == nil || j.Cmder.Process == nil {
+		return false
+	}
+
+	// 跨平台的进程状态检查
+	if runtime.GOOS == "windows" {
+		process, err := os.FindProcess(j.Cmder.Process.Pid)
+		if err != nil {
+			return false
+		}
+		err = process.Signal(syscall.Signal(0))
+		return err == nil
+	}
+
+	// Unix系统使用信号0检测
+	err := j.Cmder.Process.Signal(syscall.Signal(0))
+	if err != nil {
+		// 处理僵尸进程
+		if strings.Contains(err.Error(), "os: process already finished") {
+			return false
+		}
+	}
+	return err == nil
 }
 
 // GetIP 函数保持不变
