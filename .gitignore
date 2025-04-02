@@ -4,3 +4,5 @@
 /frpThings/
 /build
 /buildLinuxX86.sh
+/frpClient/frpc.ini
+/frpClient/frpc.yaml
