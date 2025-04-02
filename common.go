@@ -172,11 +172,18 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 		logf(absPathFrpIni, "不存在")
 		return false
 	}
+	configContent, _ := os.ReadFile(absPathFrpIni)
+	logf("配置文件内容:\n%s", string(configContent))
 
 	oneJob.CmdLine = absPathFrp
 	oneJob.CmdArgs = []string{"-c", absPathFrpIni}
-	//logf("FRP可执行文件路径: %s", absPathFrp)
-	//logf("命令执行成功：%s", oneJob.CmdLine)
+
+	// 返回前添加权限检查
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat(absPathFrp); err == nil {
+			logf("文件权限: %#o", fi.Mode().Perm())
+		}
+	}
 	return true
 }
 
@@ -273,16 +280,35 @@ func killFrpProcesses() {
 	case "windows":
 		cmd = exec.Command("taskkill", "/F", "/IM", "frp.exe")
 	default:
-		logf("不支持的操作系统")
+		logf("清理进程时，发现不支持的操作系统")
 		return
 	}
 
 	if err := cmd.Run(); err != nil {
 		logf("清理残留进程失败:%v", err)
 	}
+
+	for i := 0; i < 3; i++ {
+		if runtime.GOOS == "windows" {
+			err := exec.Command("taskkill", "/F", "/IM", "frpc.exe").Run()
+			if err != nil {
+				logf("清理残留进程失败:%v", err)
+				return
+			}
+		} else {
+			err := exec.Command("pkill", "-9", "-f", "frpc").Run()
+			if err != nil {
+				logf("清理残留进程失败:%v", err)
+				return
+			}
+		}
+		time.Sleep(1 * time.Second)
+	}
 }
 
 func startFrp(oneJob *OneJob) {
+	logf("启动参数验证: %s %v", oneJob.CmdLine, oneJob.CmdArgs)
+
 	oneJob.mu.Lock()
 	oneJob.retryCount = 0
 	oneJob.maxAllowedRetries = 0
@@ -302,6 +328,7 @@ func startFrp(oneJob *OneJob) {
 	oneJob.mu.Lock()
 	oneJob.Cmder = exec.CommandContext(oneJob.Ctx, oneJob.CmdLine, oneJob.CmdArgs...)
 	cmder := oneJob.Cmder
+	logf("完整执行命令: %s", cmder.String())
 	oneJob.mu.Unlock()
 
 	stdout, err := cmder.StdoutPipe()
@@ -322,6 +349,10 @@ func startFrp(oneJob *OneJob) {
 	startTime := time.Now()
 	if err := cmder.Start(); err != nil {
 		oneJob.Err = err
+		if oneJob.Err != nil {
+			logf("详细错误信息: %+v", oneJob.Err) // 打印完整错误堆栈
+			logf("文件是否存在: %v", FileExist(oneJob.CmdLine))
+		}
 		logf("启动失败 (耗时%s): %v\n", time.Since(startTime), err)
 		return
 	}

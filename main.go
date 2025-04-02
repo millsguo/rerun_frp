@@ -229,10 +229,22 @@ func RunOnce(vipConfig *viper.Viper) {
 		logf("IP 已改变, 重启FRP服务中...")
 
 		oneJobMu.Lock()
+		defer oneJobMu.Unlock()
+
 		closeFrp(oneJob)
 		ipCache = ipTmp
+
+		// 确保资源释放完成
+		time.Sleep(500 * time.Millisecond)
+
+		// 新增初始化检查
+		nowDir, _ := os.Getwd()
+		if !InitFrpArgs(nowDir, oneJob) {
+			logf("重启时初始化失败！")
+			return
+		}
+
 		StartFrpThings(oneJob, vipConfig)
-		oneJobMu.Unlock()
 	}
 }
 
