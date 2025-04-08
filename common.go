@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,6 +27,7 @@ type OneJob struct {
 	CmdLine           string
 	CmdArgs           []string
 	Running           bool
+	LastActive        time.Time
 	mu                sync.Mutex         // 保护所有字段
 	retryTimer        *time.Timer        // 重试定时器
 	retryCancel       context.CancelFunc // 取消重试
@@ -194,6 +196,8 @@ func StartFrpThings(oneJob *OneJob, vipConfig *viper.Viper) bool {
 		oneJob.scheduleRetry()
 		return false
 	}
+	oneJob.LastActive = time.Now() // 设置初始活动时间
+	oneJob.Running = true
 	logf("FRP服务启动成功")
 	return true
 }
@@ -252,6 +256,9 @@ func closeFrp(oneJob *OneJob) bool {
 		// 新增同步等待
 		select {
 		case <-done:
+			if _, err := cmder.Process.Wait(); err != nil {
+				logf("进程回收失败:%v", err)
+			}
 		case <-time.After(10 * time.Second):
 			logf("警告：进程终止超时")
 		}
@@ -361,6 +368,7 @@ func startFrp(oneJob *OneJob) {
 		for scanner.Scan() {
 			line := scanner.Text()
 			logf("[FRP-%s] %s\n", name, line)
+			oneJob.UpdateLastActive()
 			// 修改日志扫描逻辑，增加特定错误检测
 			if strings.Contains(line, "i/o timeout") ||
 				strings.Contains(line, "connection refused") ||
@@ -434,7 +442,7 @@ func (j *OneJob) healthCheck() {
 		case <-ticker.C:
 			oneJobMu.Lock()
 			// 双重检查运行状态
-			if !j.Running {
+			if !j.isRunning() {
 				oneJobMu.Unlock()
 				return
 			}
@@ -471,8 +479,9 @@ func (j *OneJob) isProcessAlive() bool {
 		if err != nil {
 			return false
 		}
-		err = process.Signal(syscall.Signal(0))
-		return err == nil
+		// 使用任务列表检测进程
+		out, _ := exec.Command("tasklist", "/fi", "PID eq "+strconv.Itoa(process.Pid)).Output()
+		return strings.Contains(string(out), strconv.Itoa(process.Pid))
 	}
 
 	// Unix系统使用信号0检测
@@ -532,4 +541,10 @@ func GetIP(domainName string, dnsAddress string) (string, error) {
 	//logf("解析地址 IPv4: [%s]\n", result)
 
 	return result, nil
+}
+
+func (j *OneJob) UpdateLastActive() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.LastActive = time.Now()
 }

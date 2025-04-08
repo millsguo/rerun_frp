@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"github.com/fsnotify/fsnotify"
 	"log"
 	"net"
 	"net/http"
@@ -115,7 +116,10 @@ func logMessage(msg string) {
 	}
 
 	// 格式化日志条目
-	logEntry := fmt.Sprintf("%s %s\n", now.Format("2006-01-02 15:04:05"), msg)
+	logEntry := fmt.Sprintf("%s.%03d %s\n",
+		now.Format("2006-01-02 15:04:05"),
+		now.Nanosecond()/1e6,
+		msg)
 
 	// 写入文件
 	if _, err := logFile.WriteString(logEntry); err != nil {
@@ -131,6 +135,12 @@ func logMessage(msg string) {
 
 func logf(format string, args ...interface{}) {
 	logMessage(fmt.Sprintf(format, args...))
+	// 更新最后一次活动时间
+	oneJobMu.Lock()
+	defer oneJobMu.Unlock()
+	if oneJob != nil {
+		oneJob.LastActive = time.Now()
+	}
 }
 
 var (
@@ -226,7 +236,7 @@ func RunOnce(vipConfig *viper.Viper) {
 	}
 
 	if ipTmp != ipCache {
-		logf("IP 已改变, 重启FRP服务中...")
+		logf("IP 已改变, 新IP为：" + ipTmp + "，重启FRP服务中...")
 
 		oneJobMu.Lock()
 		defer oneJobMu.Unlock()
@@ -251,6 +261,29 @@ func RunOnce(vipConfig *viper.Viper) {
 func RunTimer(vipConfig *viper.Viper) {
 	// 立即执行第一次检查
 	RunOnce(vipConfig) // 新增立即执行
+
+	// 新增静默检测定时器
+	monitorTicker := time.NewTicker(1 * time.Minute)
+	defer monitorTicker.Stop()
+
+	go func() {
+		for {
+			select {
+			case <-monitorTicker.C:
+				oneJobMu.Lock()
+				defer oneJobMu.Unlock()
+
+				if oneJob.Running && time.Since(oneJob.LastActive) > 5*time.Minute {
+					logf("检测到FRP服务静默超时，触发重启")
+					closeFrp(oneJob)
+					oneJob.LastActive = time.Now()
+					go RunOnce(vipConfig) // 异步执行避免持有锁时间过长
+				}
+			case <-shutdownCh:
+				return
+			}
+		}
+	}()
 
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
@@ -364,6 +397,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("配置文件初始化失败: %v", err)
 	}
+	vipConfig.WatchConfig()
+	vipConfig.OnConfigChange(func(e fsnotify.Event) {
+		oneJob.mu.Lock()
+		defer oneJob.mu.Unlock()
+		oneJob.maxAllowedRetries = vipConfig.GetInt("MaxRetries")
+		logf("配置已热更新，当前最大重试次数：%d", oneJob.maxAllowedRetries)
+	})
 
 	go RunTimer(vipConfig)
 
@@ -375,7 +415,12 @@ func main() {
 	startProxyServers(localSocks5Port, localProxyPort, proxyUser, proxyPass)
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigCh,
+		os.Interrupt,
+		syscall.SIGTERM,
+		syscall.SIGHUP, // 增加hangup信号
+		syscall.SIGQUIT,
+	)
 
 	<-sigCh
 	logf("退出程序...")
