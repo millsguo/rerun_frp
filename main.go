@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
-	"github.com/fsnotify/fsnotify"
 	"log"
 	"net"
 	"net/http"
@@ -14,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 
 	"github.com/armon/go-socks5"
 	"github.com/elazarl/goproxy"
@@ -41,6 +42,7 @@ var (
 	logMu          sync.Mutex
 	logFile        *os.File
 	currentLogDate string
+	logBuffer      = make(chan string, 100) // 添加日志缓冲区
 )
 
 // 初始化日志系统
@@ -48,6 +50,10 @@ func init() {
 	if err := os.MkdirAll("./log", 0755); err != nil {
 		panic(fmt.Sprintf("创建日志目录失败: %v", err))
 	}
+
+	// 启动日志写入协程
+	go logWriter()
+
 	logMu.Lock() // 新增锁
 	updateLogFile()
 	logMu.Unlock()
@@ -68,6 +74,29 @@ func init() {
 			logf("已执行每日日志文件切换")
 		}
 	}()
+}
+
+// 日志写入协程
+func logWriter() {
+	for {
+		select {
+		case msg := <-logBuffer:
+			logMu.Lock()
+			if logFile != nil {
+				// 写入文件
+				_, err := logFile.WriteString(msg)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "写入日志失败: %v\n", err)
+				}
+				// 立即刷新到磁盘
+				logFile.Sync()
+			}
+			logMu.Unlock()
+
+			// 同时输出到控制台
+			fmt.Print(msg)
+		}
+	}
 }
 
 func updateLogFile() {
@@ -121,16 +150,20 @@ func logMessage(msg string) {
 		now.Nanosecond()/1e6,
 		msg)
 
-	// 写入文件
-	if _, err := logFile.WriteString(logEntry); err != nil {
-		_, err := fmt.Fprintf(os.Stderr, "写入日志失败: %v\n", err)
-		if err != nil {
-			return
+	// 发送到缓冲区
+	select {
+	case logBuffer <- logEntry:
+	default:
+		// 如果缓冲区满了，直接写入
+		if logFile != nil {
+			_, err := logFile.WriteString(logEntry)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "写入日志失败: %v\n", err)
+			}
+			logFile.Sync() // 确保写入磁盘
 		}
+		fmt.Print(logEntry)
 	}
-
-	// 同时输出到控制台
-	fmt.Print(logEntry)
 }
 
 func logf(format string, args ...interface{}) {
