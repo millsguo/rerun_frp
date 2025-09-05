@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -86,15 +85,21 @@ func logWriter() {
 				// 写入文件
 				_, err := logFile.WriteString(msg)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "写入日志失败: %v\n", err)
+					logf("写入日志失败: %v", err)
 				}
 				// 立即刷新到磁盘
-				logFile.Sync()
+				err = logFile.Sync()
+				if err != nil {
+					logf("刷新日志到磁盘失败: %v", err)
+				}
 			}
 			logMu.Unlock()
 
 			// 同时输出到控制台
-			fmt.Print(msg)
+			_, err := fmt.Print(msg)
+			if err != nil {
+				logf("输出日志到控制台失败: %v", err)
+			}
 		}
 	}
 }
@@ -158,11 +163,17 @@ func logMessage(msg string) {
 		if logFile != nil {
 			_, err := logFile.WriteString(logEntry)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "写入日志失败: %v\n", err)
+				logf("写入日志失败: %v", err)
 			}
-			logFile.Sync() // 确保写入磁盘
+			err = logFile.Sync() // 确保写入磁盘
+			if err != nil {
+				logf("刷新日志到磁盘失败: %v", err)
+			}
 		}
-		fmt.Print(logEntry)
+		_, err := fmt.Print(logEntry)
+		if err != nil {
+			logf("输出日志到控制台失败: %v", err)
+		}
 	}
 }
 
@@ -304,13 +315,16 @@ func RunTimer(vipConfig *viper.Viper) {
 			select {
 			case <-monitorTicker.C:
 				oneJobMu.Lock()
-				defer oneJobMu.Unlock()
+				// defer oneJobMu.Unlock()  // 移除在循环中使用defer
 
 				if oneJob.Running && time.Since(oneJob.LastActive) > 5*time.Minute {
 					logf("检测到FRP服务静默超时，触发重启")
 					closeFrp(oneJob)
 					oneJob.LastActive = time.Now()
+					oneJobMu.Unlock()     // 手动释放锁
 					go RunOnce(vipConfig) // 异步执行避免持有锁时间过长
+				} else {
+					oneJobMu.Unlock() // 正常释放锁
 				}
 			case <-shutdownCh:
 				return
@@ -373,10 +387,14 @@ func startUnsecuredProxies(socksPort, httpPort int) {
 		}
 		server, err := socks5.New(&socks5.Config{})
 		if err != nil {
-			log.Fatalf("SOCKS5 代理服务启动失败: %v", err)
+			logf("SOCKS5 代理服务启动失败: %v", err)
+			os.Exit(1)
 		}
 		logf("SOCKS5 简单代理服务启动成功，监听端口 :%d", socksPort)
-		log.Fatal(server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", socksPort)))
+		if err := server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", socksPort)); err != nil {
+			logf("SOCKS5 代理服务启动失败: %v", err)
+			os.Exit(1)
+		}
 	}()
 
 	go func() {
@@ -387,10 +405,13 @@ func startUnsecuredProxies(socksPort, httpPort int) {
 		proxy := goproxy.NewProxyHttpServer()
 		proxy.Verbose = true
 		logf("HTTP 简单代理服务启动成功，监听端口 :%d", httpPort)
-		log.Fatal(http.ListenAndServe(
+		if err := http.ListenAndServe(
 			fmt.Sprintf("0.0.0.0:%d", httpPort),
 			proxy,
-		))
+		); err != nil {
+			logf("HTTP 代理服务启动失败: %v", err)
+			os.Exit(1)
+		}
 	}()
 }
 
@@ -402,10 +423,14 @@ func startSecuredProxies(socksPort, httpPort int, user, pass string) {
 		}
 		server, err := createSocks5Server(user, pass)
 		if err != nil {
-			log.Fatalf("SOCKS5 认证代理服务启动失败: %v", err)
+			logf("SOCKS5 认证代理服务启动失败: %v", err)
+			os.Exit(1)
 		}
 		logf("认证 SOCKS5 代理服务启动成功，监听端口 :%d", socksPort)
-		log.Fatal(server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", socksPort)))
+		if err := server.ListenAndServe("tcp", fmt.Sprintf("0.0.0.0:%d", socksPort)); err != nil {
+			logf("SOCKS5 认证代理服务启动失败: %v", err)
+			os.Exit(1)
+		}
 	}()
 
 	go func() {
@@ -418,17 +443,21 @@ func startSecuredProxies(socksPort, httpPort int, user, pass string) {
 		authHandler := authMiddleware(user, pass, proxy)
 
 		logf("认证 HTTP 代理服务启动成功，监听端口 :%d", httpPort)
-		log.Fatal(http.ListenAndServe(
+		if err := http.ListenAndServe(
 			fmt.Sprintf("0.0.0.0:%d", httpPort),
 			authHandler,
-		))
+		); err != nil {
+			logf("认证 HTTP 代理服务启动失败: %v", err)
+			os.Exit(1)
+		}
 	}()
 }
 
 func main() {
 	vipConfig, err := InitConfigure()
 	if err != nil {
-		log.Fatalf("配置文件初始化失败: %v", err)
+		logf("配置文件初始化失败: %v", err)
+		os.Exit(1)
 	}
 	vipConfig.WatchConfig()
 	vipConfig.OnConfigChange(func(e fsnotify.Event) {

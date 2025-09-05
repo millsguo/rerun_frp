@@ -199,6 +199,7 @@ func StartFrpThings(oneJob *OneJob, vipConfig *viper.Viper) bool {
 	oneJob.LastActive = time.Now() // 设置初始活动时间
 	oneJob.Running = true
 	logf("FRP服务启动成功")
+	logf("FRP服务启动成功")
 	return true
 }
 
