@@ -41,6 +41,11 @@ func (j *OneJob) setRunning(running bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.Running = running
+	if running {
+		logf("FRP服务状态已设置为运行中")
+	} else {
+		logf("FRP服务状态已设置为已停止")
+	}
 }
 
 // 新增方法：安全获取运行状态
@@ -114,6 +119,7 @@ func (j *OneJob) scheduleRetry() {
 		ipCache = ""
 		ipCacheMu.Unlock()
 
+		logf("开始执行第 %d 次重试", j.retryCount)
 		RunOnce(j.vipConfig)
 	})
 
@@ -134,6 +140,7 @@ func (j *OneJob) cleanupRetryResources() {
 	}
 	j.retryCount = 0 // 重置计数器
 	j.maxAllowedRetries = 0
+	logf("重试资源已清理")
 }
 
 func FileExist(path string) bool {
@@ -179,6 +186,7 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 			logf("文件权限: %#o", fi.Mode().Perm())
 		}
 	}
+	logf("FRP参数初始化完成: %s %v", oneJob.CmdLine, oneJob.CmdArgs)
 	return true
 }
 
@@ -186,6 +194,7 @@ func StartFrpThings(oneJob *OneJob, vipConfig *viper.Viper) bool {
 	oneJob.vipConfig = vipConfig // 注入配置
 
 	if oneJob.isRunning() {
+		logf("FRP服务已在运行中，无需重复启动")
 		return false
 	}
 
@@ -198,7 +207,6 @@ func StartFrpThings(oneJob *OneJob, vipConfig *viper.Viper) bool {
 	}
 	oneJob.LastActive = time.Now() // 设置初始活动时间
 	oneJob.Running = true
-	logf("FRP服务启动成功")
 	logf("FRP服务启动成功")
 	return true
 }
@@ -259,6 +267,8 @@ func closeFrp(oneJob *OneJob) bool {
 		case <-done:
 			if _, err := cmder.Process.Wait(); err != nil {
 				logf("进程回收失败:%v", err)
+			} else {
+				logf("进程已成功终止 PID:%d", cmder.Process.Pid)
 			}
 		case <-time.After(10 * time.Second):
 			logf("警告：进程终止超时")
@@ -274,6 +284,7 @@ func closeFrp(oneJob *OneJob) bool {
 }
 
 func killFrpProcesses() {
+	logf("清理残留FRP进程...")
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin", "linux":
@@ -305,6 +316,7 @@ func killFrpProcesses() {
 		}
 		time.Sleep(1 * time.Second)
 	}
+	logf("残留FRP进程清理完成")
 }
 
 func startFrp(oneJob *OneJob) {
@@ -435,6 +447,7 @@ func startFrp(oneJob *OneJob) {
 
 // 新增健康检查方法
 func (j *OneJob) healthCheck() {
+	logf("启动FRP服务健康检查")
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
@@ -444,6 +457,7 @@ func (j *OneJob) healthCheck() {
 			oneJobMu.Lock()
 			// 双重检查运行状态
 			if !j.isRunning() {
+				logf("FRP服务未运行，停止健康检查")
 				oneJobMu.Unlock()
 				return
 			}
@@ -460,6 +474,7 @@ func (j *OneJob) healthCheck() {
 			oneJobMu.Unlock()
 
 		case <-j.Ctx.Done():
+			logf("健康检查已取消")
 			return
 		}
 	}

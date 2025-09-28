@@ -454,11 +454,16 @@ func startSecuredProxies(socksPort, httpPort int, user, pass string) {
 }
 
 func main() {
+	logf("程序启动中...")
+
 	vipConfig, err := InitConfigure()
 	if err != nil {
 		logf("配置文件初始化失败: %v", err)
 		os.Exit(1)
 	}
+
+	logf("配置文件加载成功")
+
 	vipConfig.WatchConfig()
 	vipConfig.OnConfigChange(func(e fsnotify.Event) {
 		oneJob.mu.Lock()
@@ -484,8 +489,36 @@ func main() {
 		syscall.SIGQUIT,
 	)
 
-	<-sigCh
-	logf("退出程序...")
+	logf("程序已启动，等待信号...")
+
+	select {
+	case sig := <-sigCh:
+		logf("收到系统信号: %v，准备退出程序...", sig)
+	case <-shutdownCh:
+		logf("收到关闭信号，准备退出程序...")
+	}
+
 	close(shutdownCh)
+	logf("正在关闭FRP服务...")
+
+	// 等待FRP服务关闭
+	done := make(chan struct{})
+	go func() {
+		oneJobMu.Lock()
+		defer oneJobMu.Unlock()
+		if oneJob.Running {
+			closeFrp(oneJob)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		logf("FRP服务已关闭")
+	case <-time.After(30 * time.Second):
+		logf("警告：FRP服务关闭超时")
+	}
+
+	logf("程序已正常退出")
 	time.Sleep(1 * time.Second) // 等待资源清理
 }
