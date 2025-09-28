@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"github.com/spf13/viper"
 	"io"
 	"math/rand"
 	"net"
@@ -17,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/spf13/viper"
 )
 
 type OneJob struct {
