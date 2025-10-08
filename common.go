@@ -139,6 +139,10 @@ func (j *OneJob) cleanupRetryResources() {
 		j.retryCancel()
 		j.retryCancel = nil
 	}
+	if j.retryTimer != nil {
+		j.retryTimer.Stop()
+		j.retryTimer = nil
+	}
 	j.retryCount = 0 // 重置计数器
 	j.maxAllowedRetries = 0
 	logf("重试资源已清理")
@@ -392,13 +396,25 @@ func startFrp(oneJob *OneJob) {
 					oneJobMu.Lock()
 					defer oneJobMu.Unlock()
 					closeFrp(oneJob)
-					ipCache = ""              // 清空缓存强制重新获取IP
-					RunOnce(oneJob.vipConfig) // 需要将vipConfig传递到OneJob结构体中
+					ipCacheMu.Lock()
+					ipCache = "" // 清空缓存强制重新获取IP
+					ipCacheMu.Unlock()
+					// 在新的goroutine中执行重试，避免死锁
+					go RunOnce(oneJob.vipConfig) // 需要将vipConfig传递到OneJob结构体中
 				}()
 			}
 			if strings.Contains(line, "retry") || strings.Contains(line, "error") {
 				logf("检测到错误关键词，准备重试...")
-				oneJob.scheduleRetry()
+				// 只有在不是由连接错误触发的情况下才安排重试
+				if !(strings.Contains(line, "i/o timeout") ||
+					strings.Contains(line, "connection refused") ||
+					strings.Contains(line, "no such host")) {
+					go func() {
+						oneJobMu.Lock()
+						defer oneJobMu.Unlock()
+						oneJob.scheduleRetry()
+					}()
+				}
 			}
 		}
 	}
@@ -431,13 +447,21 @@ func startFrp(oneJob *OneJob) {
 				// 新增统一重试策略
 				if duration < 30*time.Second || exitCode != 0 {
 					logf("触发自动重试机制")
-					oneJob.scheduleRetry()
+					go func() {
+						oneJobMu.Lock()
+						defer oneJobMu.Unlock()
+						oneJob.scheduleRetry()
+					}()
 				}
 			} else {
 				logf("进程正常退出 (运行时长%s)", duration)
 				// 新增正常退出后的保活机制
 				if oneJob.vipConfig.GetBool("AutoRestart") {
-					oneJob.scheduleRetry()
+					go func() {
+						oneJobMu.Lock()
+						defer oneJobMu.Unlock()
+						oneJob.scheduleRetry()
+					}()
 				}
 			}
 		}
@@ -468,7 +492,15 @@ func (j *OneJob) healthCheck() {
 			if !alive {
 				logf("健康检查：进程已停止，触发重启")
 				closeFrp(j)
-				j.scheduleRetry()
+				ipCacheMu.Lock()
+				ipCache = ""
+				ipCacheMu.Unlock()
+				// 在新的goroutine中执行重试，避免死锁
+				go func() {
+					oneJobMu.Lock()
+					defer oneJobMu.Unlock()
+					RunOnce(j.vipConfig)
+				}()
 				oneJobMu.Unlock()
 				return
 			}

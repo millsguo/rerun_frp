@@ -41,7 +41,8 @@ var (
 	logMu          sync.Mutex
 	logFile        *os.File
 	currentLogDate string
-	logBuffer      = make(chan string, 100) // 添加日志缓冲区
+	logBuffer      = make(chan string, 1000) // 增加日志缓冲区容量
+	logClosed      = false                   // 标记日志是否已关闭
 )
 
 // 初始化日志系统
@@ -66,7 +67,9 @@ func init() {
 			time.Sleep(next.Sub(now))
 
 			logMu.Lock()
-			updateLogFile() // 确保该函数已移除锁操作
+			if !logClosed {
+				updateLogFile() // 确保该函数已移除锁操作
+			}
 			logMu.Unlock()
 
 			// 添加容错机制
@@ -79,26 +82,41 @@ func init() {
 func logWriter() {
 	for {
 		select {
-		case msg := <-logBuffer:
+		case msg, ok := <-logBuffer:
+			if !ok {
+				// 通道已关闭，退出写入循环
+				return
+			}
+
 			logMu.Lock()
-			if logFile != nil {
-				// 写入文件
-				_, err := logFile.WriteString(msg)
-				if err != nil {
-					logf("写入日志失败: %v", err)
-				}
-				// 立即刷新到磁盘
-				err = logFile.Sync()
-				if err != nil {
-					logf("刷新日志到磁盘失败: %v", err)
-				}
+			// 检查日志是否已关闭
+			if logClosed || logFile == nil {
+				logMu.Unlock()
+				// 如果日志文件已关闭，直接输出到控制台
+				fmt.Print(msg)
+				continue
+			}
+
+			// 写入文件
+			_, err := logFile.WriteString(msg)
+			if err != nil {
+				logf("写入日志失败: %v", err)
+				logMu.Unlock()
+				fmt.Print(msg)
+				continue
+			}
+			// 立即刷新到磁盘
+			err = logFile.Sync()
+			if err != nil {
+				logf("刷新日志到磁盘失败: %v", err)
 			}
 			logMu.Unlock()
 
 			// 同时输出到控制台
-			_, err := fmt.Print(msg)
+			_, err = fmt.Print(msg)
 			if err != nil {
-				logf("输出日志到控制台失败: %v", err)
+				// 即使输出到控制台失败，也不应该影响日志写入
+				// 这里我们只记录错误但不中断程序
 			}
 		}
 	}
@@ -123,7 +141,7 @@ func updateLogFile() {
 	if logFile != nil {
 		err := logFile.Close()
 		if err != nil {
-			return
+			// 即使关闭失败也继续执行
 		}
 	}
 
@@ -131,16 +149,27 @@ func updateLogFile() {
 	filename := fmt.Sprintf("./log/log-%s.log", today)
 	file, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
-		panic(fmt.Sprintf("打开日志文件失败: %v", err))
+		// 如果无法创建日志文件，继续运行但标记为已关闭
+		logFile = nil
+		logClosed = true
+		logf("打开日志文件失败: %v", err)
+		return
 	}
 
 	logFile = file
+	logClosed = false
 	currentLogDate = today
 }
 
 func logMessage(msg string) {
 	logMu.Lock()
 	defer logMu.Unlock()
+
+	// 如果日志已关闭，直接输出到控制台
+	if logClosed {
+		fmt.Print(msg)
+		return
+	}
 
 	// 再次检查日期防止其他goroutine已经更新
 	now := time.Now()
@@ -172,7 +201,7 @@ func logMessage(msg string) {
 		}
 		_, err := fmt.Print(logEntry)
 		if err != nil {
-			logf("输出日志到控制台失败: %v", err)
+			// 即使输出到控制台失败，也不应该影响程序运行
 		}
 	}
 }
@@ -185,6 +214,27 @@ func logf(format string, args ...interface{}) {
 	if oneJob != nil {
 		oneJob.LastActive = time.Now()
 	}
+}
+
+// 优雅关闭日志系统
+func closeLogger() {
+	logMu.Lock()
+	defer logMu.Unlock()
+
+	// 标记日志系统为已关闭
+	logClosed = true
+
+	// 关闭日志文件
+	if logFile != nil {
+		err := logFile.Close()
+		if err != nil {
+			fmt.Printf("关闭日志文件失败: %v\n", err)
+		}
+		logFile = nil
+	}
+
+	// 关闭日志缓冲区通道
+	close(logBuffer)
 }
 
 var (
@@ -491,13 +541,11 @@ func main() {
 
 	logf("程序已启动，等待信号...")
 
-	select {
-	case sig := <-sigCh:
-		logf("收到系统信号: %v，准备退出程序...", sig)
-	case <-shutdownCh:
-		logf("收到关闭信号，准备退出程序...")
-	}
+	// 等待信号
+	sig := <-sigCh
+	logf("收到系统信号: %v，准备退出程序...", sig)
 
+	// 关闭程序
 	close(shutdownCh)
 	logf("正在关闭FRP服务...")
 
@@ -519,6 +567,7 @@ func main() {
 		logf("警告：FRP服务关闭超时")
 	}
 
+	logf("正在关闭日志系统...")
+	closeLogger()
 	logf("程序已正常退出")
-	time.Sleep(1 * time.Second) // 等待资源清理
 }
