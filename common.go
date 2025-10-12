@@ -285,6 +285,16 @@ func closeFrp(oneJob *OneJob) bool {
 	killFrpProcesses()
 	oneJob.setRunning(false)
 	logf("FRP服务关闭完成")
+
+	// 确保日志系统正常工作
+	logMu.Lock()
+	if logClosed {
+		logf("检测到日志系统已关闭，重新初始化日志系统")
+		logClosed = false
+		updateLogFile()
+	}
+	logMu.Unlock()
+
 	return true
 }
 
@@ -596,4 +606,10 @@ func (j *OneJob) UpdateLastActive() {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.LastActive = time.Now()
+	// 同时更新全局oneJob的活动时间，确保一致性
+	oneJobMu.Lock()
+	defer oneJobMu.Unlock()
+	if oneJob != nil {
+		oneJob.LastActive = time.Now()
+	}
 }

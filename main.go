@@ -209,11 +209,14 @@ func logMessage(msg string) {
 func logf(format string, args ...interface{}) {
 	logMessage(fmt.Sprintf(format, args...))
 	// 更新最后一次活动时间
-	oneJobMu.Lock()
-	defer oneJobMu.Unlock()
-	if oneJob != nil {
-		oneJob.LastActive = time.Now()
-	}
+	// 使用非阻塞方式更新活动时间，避免日志系统与FRP服务管理之间的死锁
+	go func() {
+		oneJobMu.Lock()
+		defer oneJobMu.Unlock()
+		if oneJob != nil {
+			oneJob.LastActive = time.Now()
+		}
+	}()
 }
 
 // 优雅关闭日志系统
