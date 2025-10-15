@@ -342,7 +342,7 @@ func RunOnce(vipConfig *viper.Viper) {
 		ipCache = ipTmp
 
 		// 确保资源释放完成
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(1 * time.Second)
 
 		// 新增初始化检查
 		nowDir, _ := os.Getwd()

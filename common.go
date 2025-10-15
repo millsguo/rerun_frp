@@ -283,6 +283,8 @@ func closeFrp(oneJob *OneJob) bool {
 	}
 
 	killFrpProcesses()
+	// 等待一段时间确保进程完全终止
+	time.Sleep(1 * time.Second)
 	oneJob.setRunning(false)
 	logf("FRP服务关闭完成")
 
