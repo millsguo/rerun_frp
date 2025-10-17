@@ -593,7 +593,7 @@ func (j *OneJob) isProcessAlive() bool {
 		// 其他错误也认为进程不存在
 		return false
 	}
-	return err == nil
+	return true
 }
 
 // GetIP 函数保持不变
