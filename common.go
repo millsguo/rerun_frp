@@ -121,6 +121,8 @@ func (j *OneJob) scheduleRetry() {
 		ipCacheMu.Unlock()
 
 		logf("开始执行第 %d 次重试", j.retryCount)
+		// 在重试前增加短暂等待，确保资源完全释放
+		time.Sleep(2 * time.Second)
 		RunOnce(j.vipConfig)
 	})
 
@@ -198,6 +200,7 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 func StartFrpThings(oneJob *OneJob, vipConfig *viper.Viper) bool {
 	oneJob.vipConfig = vipConfig // 注入配置
 
+	logf("检查FRP服务运行状态...")
 	if oneJob.isRunning() {
 		logf("FRP服务已在运行中，无需重复启动")
 		return false
@@ -207,6 +210,9 @@ func StartFrpThings(oneJob *OneJob, vipConfig *viper.Viper) bool {
 	startFrp(oneJob)
 	if oneJob.Err != nil {
 		logf("启动失败:%v", oneJob.Err)
+		// 增加重试前的短暂等待，确保资源释放
+		logf("等待资源释放后重试...")
+		time.Sleep(1 * time.Second)
 		oneJob.scheduleRetry()
 		return false
 	}
@@ -221,6 +227,7 @@ func closeFrp(oneJob *OneJob) bool {
 
 	// 清理重试机制
 	oneJob.mu.Lock()
+	logf("清理重试定时器和上下文...")
 	if oneJob.retryCancel != nil {
 		oneJob.retryCancel()
 		oneJob.retryCancel = nil
@@ -235,6 +242,7 @@ func closeFrp(oneJob *OneJob) bool {
 	var cancelFunc func()
 	if oneJob.Cmder != nil {
 		cmder = oneJob.Cmder
+		logf("获取到正在运行的命令进程 PID:%d", cmder.Process.Pid)
 	}
 	if oneJob.Cancel != nil {
 		cancelFunc = oneJob.Cancel
@@ -243,11 +251,12 @@ func closeFrp(oneJob *OneJob) bool {
 
 	// 执行关闭操作
 	if cancelFunc != nil {
+		logf("发送取消信号...")
 		cancelFunc()
 	}
 
 	if cmder != nil && cmder.Process != nil {
-		logf("终止进程 PID:%d\n", cmder.Process.Pid)
+		logf("终止进程 PID:%d", cmder.Process.Pid)
 		if err := cmder.Process.Signal(os.Interrupt); err != nil {
 			logf("发送中断信号失败:%v", err)
 		}
@@ -259,10 +268,12 @@ func closeFrp(oneJob *OneJob) bool {
 			defer close(done)
 			select {
 			case <-time.After(5 * time.Second):
+				logf("进程未在5秒内正常退出，尝试强制终止...")
 				if err := cmder.Process.Kill(); err != nil {
 					logf("强制终止失败:%v", err)
 				}
 			case <-oneJob.Ctx.Done(): // 新增上下文监听
+				logf("接收到上下文完成信号")
 				return
 			}
 		}()
@@ -282,9 +293,11 @@ func closeFrp(oneJob *OneJob) bool {
 		logf("无运行中的进程")
 	}
 
+	logf("开始清理残留FRP进程...")
 	killFrpProcesses()
-	// 等待一段时间确保进程完全终止
-	time.Sleep(1 * time.Second)
+	// 等待一段时间确保进程完全终止，增加等待时间
+	logf("等待进程完全终止...")
+	time.Sleep(3 * time.Second)
 	oneJob.setRunning(false)
 	logf("FRP服务关闭完成")
 
@@ -306,29 +319,43 @@ func killFrpProcesses() {
 	switch runtime.GOOS {
 	case "darwin", "linux":
 		cmd = exec.Command("pkill", "-f", "frp")
+		logf("执行命令: pkill -f frp")
 	case "windows":
 		cmd = exec.Command("taskkill", "/F", "/IM", "frp.exe")
+		logf("执行命令: taskkill /F /IM frp.exe")
 	default:
-		logf("清理进程时，发现不支持的操作系统")
+		logf("清理进程时，发现不支持的操作系统: %s", runtime.GOOS)
 		return
 	}
 
 	if err := cmd.Run(); err != nil {
 		logf("清理残留进程失败:%v", err)
+	} else {
+		logf("清理frp主进程命令执行完成")
 	}
 
-	for i := 0; i < 3; i++ {
+	// 增加额外的清理步骤
+	logf("开始清理frpc残留进程...")
+	for i := 0; i < 5; i++ {
 		if runtime.GOOS == "windows" {
 			err := exec.Command("taskkill", "/F", "/IM", "frpc.exe").Run()
 			if err != nil {
-				logf("清理残留进程失败:%v", err)
-				return
+				if i == 0 {
+					logf("清理残留frpc进程失败:%v", err)
+				}
+			} else {
+				logf("frpc进程已清理")
+				break
 			}
 		} else {
 			err := exec.Command("pkill", "-9", "-f", "frpc").Run()
 			if err != nil {
-				logf("清理残留进程失败:%v", err)
-				return
+				if i == 0 {
+					logf("清理残留frpc进程失败:%v", err)
+				}
+			} else {
+				logf("frpc进程已清理")
+				break
 			}
 		}
 		time.Sleep(1 * time.Second)
@@ -337,6 +364,7 @@ func killFrpProcesses() {
 }
 
 func startFrp(oneJob *OneJob) {
+	logf("开始启动FRP服务...")
 	//logf("启动参数验证: %s %v", oneJob.CmdLine, oneJob.CmdArgs)
 	oneJob.mu.Lock()
 	oneJob.retryCount = 0
@@ -355,6 +383,7 @@ func startFrp(oneJob *OneJob) {
 	}()
 
 	oneJob.mu.Lock()
+	logf("创建命令上下文: %s %v", oneJob.CmdLine, oneJob.CmdArgs)
 	oneJob.Cmder = exec.CommandContext(oneJob.Ctx, oneJob.CmdLine, oneJob.CmdArgs...)
 	cmder := oneJob.Cmder
 	logf("完整执行命令: %s", cmder.String())
@@ -376,6 +405,7 @@ func startFrp(oneJob *OneJob) {
 
 	// 添加启动时间记录
 	startTime := time.Now()
+	logf("开始启动FRP进程...")
 	if err := cmder.Start(); err != nil {
 		oneJob.Err = err
 		if oneJob.Err != nil {
@@ -390,6 +420,7 @@ func startFrp(oneJob *OneJob) {
 	logf("进程已启动 PID:%d (耗时%s)\n", cmder.Process.Pid, time.Since(startTime))
 
 	//启动健康检查
+	logf("启动健康检查协程...")
 	go oneJob.healthCheck()
 
 	// 日志处理
@@ -412,6 +443,7 @@ func startFrp(oneJob *OneJob) {
 					ipCache = "" // 清空缓存强制重新获取IP
 					ipCacheMu.Unlock()
 					// 在新的goroutine中执行重试，避免死锁
+					logf("因连接错误触发重试机制")
 					go RunOnce(oneJob.vipConfig) // 需要将vipConfig传递到OneJob结构体中
 				}()
 			}
@@ -431,12 +463,14 @@ func startFrp(oneJob *OneJob) {
 		}
 	}
 
+	logf("启动标准输出和错误日志扫描器...")
 	go scanOutput(stdout, "stdout")
 	go scanOutput(stderr, "stderr")
 
 	// 进程监控
 	// 修改进程监控部分
 	go func() {
+		logf("启动进程监控协程...")
 		err := cmder.Wait()
 		duration := time.Since(startTime)
 
@@ -500,6 +534,7 @@ func (j *OneJob) healthCheck() {
 			}
 
 			// 检查进程状态
+			logf("执行健康检查...")
 			alive := j.isProcessAlive()
 			if !alive {
 				logf("健康检查：进程已停止，触发重启")
@@ -511,11 +546,13 @@ func (j *OneJob) healthCheck() {
 				go func() {
 					oneJobMu.Lock()
 					defer oneJobMu.Unlock()
+					logf("因健康检查失败触发重试")
 					RunOnce(j.vipConfig)
 				}()
 				oneJobMu.Unlock()
 				return
 			}
+			logf("健康检查完成，进程运行正常")
 			oneJobMu.Unlock()
 
 		case <-j.Ctx.Done():
@@ -530,6 +567,7 @@ func (j *OneJob) isProcessAlive() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 
+	// 如果没有命令或进程，直接返回false
 	if j.Cmder == nil || j.Cmder.Process == nil {
 		return false
 	}
@@ -552,6 +590,8 @@ func (j *OneJob) isProcessAlive() bool {
 		if strings.Contains(err.Error(), "os: process already finished") {
 			return false
 		}
+		// 其他错误也认为进程不存在
+		return false
 	}
 	return err == nil
 }

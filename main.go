@@ -328,30 +328,48 @@ func RunOnce(vipConfig *viper.Viper) {
 
 	if ipCache == "" {
 		ipCache = ipTmp
+		logf("首次启动FRP服务，IP: %s", ipTmp)
 		StartFrpThings(oneJob, vipConfig)
 		return
 	}
 
 	if ipTmp != ipCache {
-		logf("IP 已改变, 新IP为：" + ipTmp + "，重启FRP服务中...")
+		logf("IP 已改变, 原IP: %s, 新IP: %s，重启FRP服务中...", ipCache, ipTmp)
 
 		oneJobMu.Lock()
 		defer oneJobMu.Unlock()
 
+		logf("开始关闭当前FRP服务...")
 		closeFrp(oneJob)
+		logf("FRP服务关闭完成")
+
 		ipCache = ipTmp
 
-		// 确保资源释放完成
-		time.Sleep(1 * time.Second)
+		// 确保资源释放完成，增加等待时间
+		logf("等待资源释放...")
+		time.Sleep(2 * time.Second)
 
 		// 新增初始化检查
 		nowDir, _ := os.Getwd()
+		logf("重新初始化FRP参数...")
 		if !InitFrpArgs(nowDir, oneJob) {
 			logf("重启时初始化失败！")
 			return
 		}
 
+		// 再次检查是否已经有运行中的进程
+		if oneJob.Running {
+			logf("检测到FRP服务仍在运行，强制关闭...")
+			closeFrp(oneJob)
+			logf("等待强制关闭完成...")
+			time.Sleep(2 * time.Second)
+		}
+
+		logf("开始启动新的FRP服务...")
 		StartFrpThings(oneJob, vipConfig)
+		logf("FRP服务重启流程执行完成")
+	} else {
+		logf("IP未发生变化: %s", ipTmp)
 	}
 }
 
