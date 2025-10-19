@@ -297,7 +297,7 @@ func closeFrp(oneJob *OneJob) bool {
 	killFrpProcesses()
 	// 等待一段时间确保进程完全终止，增加等待时间
 	logf("等待进程完全终止...")
-	time.Sleep(3 * time.Second)
+	time.Sleep(5 * time.Second)
 	oneJob.setRunning(false)
 	logf("FRP服务关闭完成")
 
@@ -360,6 +360,9 @@ func killFrpProcesses() {
 		}
 		time.Sleep(1 * time.Second)
 	}
+
+	// 添加额外的等待时间确保进程完全终止
+	time.Sleep(2 * time.Second)
 	logf("残留FRP进程清理完成")
 }
 
