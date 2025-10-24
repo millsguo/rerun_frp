@@ -121,8 +121,9 @@ func (j *OneJob) scheduleRetry() {
 		ipCacheMu.Unlock()
 
 		logf("开始执行第 %d 次重试", j.retryCount)
-		// 在重试前增加短暂等待，确保资源完全释放
-		time.Sleep(2 * time.Second)
+		// 在重试前增加更长的等待时间，确保资源完全释放
+		logf("等待更长时间以确保资源完全释放...")
+		time.Sleep(5 * time.Second) // 增加等待时间从2秒到5秒
 		RunOnce(j.vipConfig)
 	})
 
@@ -201,6 +202,7 @@ func StartFrpThings(oneJob *OneJob, vipConfig *viper.Viper) bool {
 	oneJob.vipConfig = vipConfig // 注入配置
 
 	logf("检查FRP服务运行状态...")
+	// 使用安全方法检查运行状态
 	if oneJob.isRunning() {
 		logf("FRP服务已在运行中，无需重复启动")
 		return false
@@ -217,7 +219,7 @@ func StartFrpThings(oneJob *OneJob, vipConfig *viper.Viper) bool {
 		return false
 	}
 	oneJob.LastActive = time.Now() // 设置初始活动时间
-	oneJob.Running = true
+	oneJob.setRunning(true)
 	logf("FRP服务启动成功")
 	return true
 }
@@ -298,6 +300,8 @@ func closeFrp(oneJob *OneJob) bool {
 	// 等待一段时间确保进程完全终止，增加等待时间
 	logf("等待进程完全终止...")
 	time.Sleep(5 * time.Second)
+
+	// 使用原子操作更新运行状态，避免锁竞争
 	oneJob.setRunning(false)
 	logf("FRP服务关闭完成")
 
@@ -362,7 +366,7 @@ func killFrpProcesses() {
 	}
 
 	// 添加额外的等待时间确保进程完全终止
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second) // 增加等待时间从2秒到3秒
 	logf("残留FRP进程清理完成")
 }
 
@@ -392,6 +396,9 @@ func startFrp(oneJob *OneJob) {
 	logf("完整执行命令: %s", cmder.String())
 	oneJob.mu.Unlock()
 
+	// 在启动前增加延迟，确保之前的进程完全终止
+	time.Sleep(2 * time.Second)
+
 	stdout, err := cmder.StdoutPipe()
 	if err != nil {
 		oneJob.Err = err
@@ -419,7 +426,8 @@ func startFrp(oneJob *OneJob) {
 		return
 	}
 
-	oneJob.setRunning(true)
+	// 使用安全方法更新运行状态
+	oneJob.UpdateRunningState(true)
 	logf("进程已启动 PID:%d (耗时%s)\n", cmder.Process.Pid, time.Since(startTime))
 
 	//启动健康检查
@@ -438,17 +446,13 @@ func startFrp(oneJob *OneJob) {
 				strings.Contains(line, "connection refused") ||
 				strings.Contains(line, "no such host") {
 				logf("检测到连接错误，触发强制IP检查")
-				go func() {
-					oneJobMu.Lock()
-					defer oneJobMu.Unlock()
-					closeFrp(oneJob)
-					ipCacheMu.Lock()
-					ipCache = "" // 清空缓存强制重新获取IP
-					ipCacheMu.Unlock()
-					// 在新的goroutine中执行重试，避免死锁
-					logf("因连接错误触发重试机制")
-					go RunOnce(oneJob.vipConfig) // 需要将vipConfig传递到OneJob结构体中
-				}()
+				closeFrp(oneJob)
+				ipCacheMu.Lock()
+				ipCache = "" // 清空缓存强制重新获取IP
+				ipCacheMu.Unlock()
+				// 在新的goroutine中执行重试，避免死锁
+				logf("因连接错误触发重试机制")
+				go RunOnce(oneJob.vipConfig) // 需要将vipConfig传递到OneJob结构体中
 			}
 			if strings.Contains(line, "retry") || strings.Contains(line, "error") {
 				logf("检测到错误关键词，准备重试...")
@@ -456,11 +460,7 @@ func startFrp(oneJob *OneJob) {
 				if !(strings.Contains(line, "i/o timeout") ||
 					strings.Contains(line, "connection refused") ||
 					strings.Contains(line, "no such host")) {
-					go func() {
-						oneJobMu.Lock()
-						defer oneJobMu.Unlock()
-						oneJob.scheduleRetry()
-					}()
+					oneJob.scheduleRetry()
 				}
 			}
 		}
@@ -496,21 +496,15 @@ func startFrp(oneJob *OneJob) {
 				// 新增统一重试策略
 				if duration < 30*time.Second || exitCode != 0 {
 					logf("触发自动重试机制")
-					go func() {
-						oneJobMu.Lock()
-						defer oneJobMu.Unlock()
-						oneJob.scheduleRetry()
-					}()
+					// 在重试之前增加等待时间，确保资源完全释放
+					time.Sleep(3 * time.Second)
+					oneJob.scheduleRetry()
 				}
 			} else {
 				logf("进程正常退出 (运行时长%s)", duration)
 				// 新增正常退出后的保活机制
 				if oneJob.vipConfig.GetBool("AutoRestart") {
-					go func() {
-						oneJobMu.Lock()
-						defer oneJobMu.Unlock()
-						oneJob.scheduleRetry()
-					}()
+					oneJob.scheduleRetry()
 				}
 			}
 		}
@@ -597,6 +591,25 @@ func (j *OneJob) isProcessAlive() bool {
 		return false
 	}
 	return true
+}
+
+// UpdateRunningState 安全地更新运行状态，避免锁竞争
+func (j *OneJob) UpdateRunningState(running bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.Running = running
+	if running {
+		logf("FRP服务状态已设置为运行中")
+	} else {
+		logf("FRP服务状态已设置为已停止")
+	}
+}
+
+// GetRunningState 安全地获取运行状态，避免锁竞争
+func (j *OneJob) GetRunningState() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.Running
 }
 
 // GetIP 函数保持不变
