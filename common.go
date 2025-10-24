@@ -56,6 +56,25 @@ func (j *OneJob) isRunning() bool {
 	return j.Running
 }
 
+// 新增方法：安全获取运行状态（公开方法）
+func (j *OneJob) GetRunningState() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.Running
+}
+
+// 新增方法：安全设置运行状态（公开方法）
+func (j *OneJob) UpdateRunningState(running bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.Running = running
+	if running {
+		logf("FRP服务状态已设置为运行中")
+	} else {
+		logf("FRP服务状态已设置为已停止")
+	}
+}
+
 // 新增方法：调度重试
 func (j *OneJob) scheduleRetry() {
 	j.mu.Lock()
@@ -227,94 +246,114 @@ func StartFrpThings(oneJob *OneJob, vipConfig *viper.Viper) bool {
 func closeFrp(oneJob *OneJob) bool {
 	logf("关闭FRP服务...")
 
-	// 清理重试机制
-	oneJob.mu.Lock()
-	logf("清理重试定时器和上下文...")
-	if oneJob.retryCancel != nil {
-		oneJob.retryCancel()
-		oneJob.retryCancel = nil
-	}
-	if oneJob.retryTimer != nil {
-		oneJob.retryTimer.Stop()
-		oneJob.retryTimer = nil
-	}
-
-	// 获取当前状态
-	var cmder *exec.Cmd
-	var cancelFunc func()
-	if oneJob.Cmder != nil {
-		cmder = oneJob.Cmder
-		logf("获取到正在运行的命令进程 PID:%d", cmder.Process.Pid)
-	}
-	if oneJob.Cancel != nil {
-		cancelFunc = oneJob.Cancel
-	}
-	oneJob.mu.Unlock()
-
-	// 执行关闭操作
-	if cancelFunc != nil {
-		logf("发送取消信号...")
-		cancelFunc()
-	}
-
-	if cmder != nil && cmder.Process != nil {
-		logf("终止进程 PID:%d", cmder.Process.Pid)
-		if err := cmder.Process.Signal(os.Interrupt); err != nil {
-			logf("发送中断信号失败:%v", err)
-		}
-
-		// 异步等待终止
-		// 优化异步等待逻辑
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			select {
-			case <-time.After(5 * time.Second):
-				logf("进程未在5秒内正常退出，尝试强制终止...")
-				if err := cmder.Process.Kill(); err != nil {
-					logf("强制终止失败:%v", err)
-				}
-			case <-oneJob.Ctx.Done(): // 新增上下文监听
-				logf("接收到上下文完成信号")
-				return
+	// 使用通道来同步关闭操作，避免阻塞
+	done := make(chan bool, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logf("关闭FRP服务时发生异常: %v", r)
+				done <- false
 			}
 		}()
 
-		// 新增同步等待
-		select {
-		case <-done:
-			if _, err := cmder.Process.Wait(); err != nil {
-				logf("进程回收失败:%v", err)
-			} else {
-				logf("进程已成功终止 PID:%d", cmder.Process.Pid)
-			}
-		case <-time.After(10 * time.Second):
-			logf("警告：进程终止超时")
+		// 清理重试机制
+		oneJob.mu.Lock()
+		logf("清理重试定时器和上下文...")
+		if oneJob.retryCancel != nil {
+			oneJob.retryCancel()
+			oneJob.retryCancel = nil
 		}
-	} else {
-		logf("无运行中的进程")
+		if oneJob.retryTimer != nil {
+			oneJob.retryTimer.Stop()
+			oneJob.retryTimer = nil
+		}
+
+		// 获取当前状态
+		var cmder *exec.Cmd
+		var cancelFunc func()
+		if oneJob.Cmder != nil {
+			cmder = oneJob.Cmder
+			logf("获取到正在运行的命令进程 PID:%d", cmder.Process.Pid)
+		}
+		if oneJob.Cancel != nil {
+			cancelFunc = oneJob.Cancel
+		}
+		oneJob.mu.Unlock()
+
+		// 执行关闭操作
+		if cancelFunc != nil {
+			logf("发送取消信号...")
+			cancelFunc()
+		}
+
+		if cmder != nil && cmder.Process != nil {
+			logf("终止进程 PID:%d", cmder.Process.Pid)
+			if err := cmder.Process.Signal(os.Interrupt); err != nil {
+				logf("发送中断信号失败:%v", err)
+			}
+
+			// 异步等待终止
+			// 优化异步等待逻辑
+			processDone := make(chan struct{})
+			go func() {
+				defer close(processDone)
+				select {
+				case <-time.After(5 * time.Second):
+					logf("进程未在5秒内正常退出，尝试强制终止...")
+					if err := cmder.Process.Kill(); err != nil {
+						logf("强制终止失败:%v", err)
+					}
+				case <-oneJob.Ctx.Done(): // 新增上下文监听
+					logf("接收到上下文完成信号")
+					return
+				}
+			}()
+
+			// 新增同步等待
+			select {
+			case <-processDone:
+				if _, err := cmder.Process.Wait(); err != nil {
+					logf("进程回收失败:%v", err)
+				} else {
+					logf("进程已成功终止 PID:%d", cmder.Process.Pid)
+				}
+			case <-time.After(10 * time.Second):
+				logf("警告：进程终止超时")
+			}
+		} else {
+			logf("无运行中的进程")
+		}
+
+		logf("开始清理残留FRP进程...")
+		killFrpProcesses()
+		// 等待一段时间确保进程完全终止，增加等待时间
+		logf("等待进程完全终止...")
+		time.Sleep(5 * time.Second)
+
+		// 使用原子操作更新运行状态，避免锁竞争
+		oneJob.UpdateRunningState(false)
+		logf("FRP服务关闭完成")
+
+		// 确保日志系统正常工作
+		logMu.Lock()
+		if logClosed {
+			logf("检测到日志系统已关闭，重新初始化日志系统")
+			logClosed = false
+			updateLogFile()
+		}
+		logMu.Unlock()
+
+		done <- true
+	}()
+
+	// 等待关闭操作完成，设置超时时间
+	select {
+	case result := <-done:
+		return result
+	case <-time.After(30 * time.Second):
+		logf("关闭FRP服务超时")
+		return false
 	}
-
-	logf("开始清理残留FRP进程...")
-	killFrpProcesses()
-	// 等待一段时间确保进程完全终止，增加等待时间
-	logf("等待进程完全终止...")
-	time.Sleep(5 * time.Second)
-
-	// 使用原子操作更新运行状态，避免锁竞争
-	oneJob.setRunning(false)
-	logf("FRP服务关闭完成")
-
-	// 确保日志系统正常工作
-	logMu.Lock()
-	if logClosed {
-		logf("检测到日志系统已关闭，重新初始化日志系统")
-		logClosed = false
-		updateLogFile()
-	}
-	logMu.Unlock()
-
-	return true
 }
 
 func killFrpProcesses() {
@@ -332,41 +371,46 @@ func killFrpProcesses() {
 		return
 	}
 
-	if err := cmd.Run(); err != nil {
-		logf("清理残留进程失败:%v", err)
-	} else {
-		logf("清理frp主进程命令执行完成")
+	// 为清理进程命令设置超时
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Run()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			logf("清理残留进程失败:%v", err)
+		} else {
+			logf("清理frp主进程命令执行完成")
+		}
+	case <-time.After(10 * time.Second):
+		logf("清理frp主进程命令执行超时")
 	}
 
 	// 增加额外的清理步骤
 	logf("开始清理frpc残留进程...")
 	for i := 0; i < 5; i++ {
+		var err error
 		if runtime.GOOS == "windows" {
-			err := exec.Command("taskkill", "/F", "/IM", "frpc.exe").Run()
-			if err != nil {
-				if i == 0 {
-					logf("清理残留frpc进程失败:%v", err)
-				}
-			} else {
-				logf("frpc进程已清理")
-				break
+			err = exec.Command("taskkill", "/F", "/IM", "frpc.exe").Run()
+		} else {
+			err = exec.Command("pkill", "-9", "-f", "frpc").Run()
+		}
+
+		if err != nil {
+			if i == 0 {
+				logf("清理残留frpc进程失败:%v", err)
 			}
 		} else {
-			err := exec.Command("pkill", "-9", "-f", "frpc").Run()
-			if err != nil {
-				if i == 0 {
-					logf("清理残留frpc进程失败:%v", err)
-				}
-			} else {
-				logf("frpc进程已清理")
-				break
-			}
+			logf("frpc进程已清理")
+			break
 		}
 		time.Sleep(1 * time.Second)
 	}
 
 	// 添加额外的等待时间确保进程完全终止
-	time.Sleep(3 * time.Second) // 增加等待时间从2秒到3秒
+	time.Sleep(3 * time.Second)
 	logf("残留FRP进程清理完成")
 }
 
@@ -593,23 +637,31 @@ func (j *OneJob) isProcessAlive() bool {
 	return true
 }
 
-// UpdateRunningState 安全地更新运行状态，避免锁竞争
-func (j *OneJob) UpdateRunningState(running bool) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	j.Running = running
-	if running {
-		logf("FRP服务状态已设置为运行中")
-	} else {
-		logf("FRP服务状态已设置为已停止")
-	}
-}
+// ForceClose 强制关闭FRP服务，用于紧急情况
+func (j *OneJob) ForceClose() bool {
+	logf("强制关闭FRP服务...")
 
-// GetRunningState 安全地获取运行状态，避免锁竞争
-func (j *OneJob) GetRunningState() bool {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	return j.Running
+	// 先尝试正常关闭
+	result := closeFrp(j)
+	if result {
+		logf("正常关闭FRP服务成功")
+		return true
+	}
+
+	// 如果正常关闭失败，执行强制清理
+	logf("正常关闭失败，执行强制清理...")
+
+	// 直接清理进程
+	killFrpProcesses()
+
+	// 更新状态
+	j.UpdateRunningState(false)
+
+	// 等待一段时间确保进程完全终止
+	time.Sleep(3 * time.Second)
+
+	logf("强制关闭FRP服务完成")
+	return true
 }
 
 // GetIP 函数保持不变

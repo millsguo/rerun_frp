@@ -338,7 +338,24 @@ func RunOnce(vipConfig *viper.Viper) {
 
 		// 不再在锁内调用closeFrp，避免死锁
 		logf("开始关闭当前FRP服务...")
-		closeFrp(oneJob)
+		// 设置超时时间，避免无限等待
+		closeDone := make(chan bool, 1)
+		go func() {
+			result := closeFrp(oneJob)
+			closeDone <- result
+		}()
+
+		// 等待关闭完成，最多等待30秒
+		select {
+		case result := <-closeDone:
+			if !result {
+				logf("关闭FRP服务失败，尝试强制关闭...")
+				oneJob.ForceClose()
+			}
+		case <-time.After(30 * time.Second):
+			logf("关闭FRP服务超时，尝试强制关闭...")
+			oneJob.ForceClose()
+		}
 		logf("FRP服务关闭完成")
 
 		ipCache = ipTmp
@@ -348,7 +365,7 @@ func RunOnce(vipConfig *viper.Viper) {
 		time.Sleep(5 * time.Second)
 
 		// 新增初始化检查
-		nowDir, _ := os.Getwd()
+		nowDir, _ = os.Getwd()
 		logf("重新初始化FRP参数...")
 		if !InitFrpArgs(nowDir, oneJob) {
 			logf("重启时初始化失败！")
@@ -358,7 +375,7 @@ func RunOnce(vipConfig *viper.Viper) {
 		// 再次检查是否已经有运行中的进程，使用安全方法检查运行状态
 		if oneJob.GetRunningState() {
 			logf("检测到FRP服务仍在运行，强制关闭...")
-			closeFrp(oneJob)
+			oneJob.ForceClose()
 			logf("等待强制关闭完成...")
 			time.Sleep(5 * time.Second)
 		}
