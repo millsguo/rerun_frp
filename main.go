@@ -60,10 +60,16 @@ func init() {
 
 	// 添加定时器（在初始化最后添加）
 	go func() {
+		// 设置UTC+8时区
+		location, err := time.LoadLocation("Asia/Shanghai")
+		if err != nil {
+			location = time.FixedZone("UTC+8", 8*60*60)
+		}
+
 		for {
-			now := time.Now().Local()
-			// 计算下一个本地时间的零点
-			next := now.Truncate(24 * time.Hour).Add(24 * time.Hour)
+			now := time.Now().In(location)
+			// 计算下一个UTC+8时区的零点
+			next := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location).Add(24 * time.Hour)
 			time.Sleep(next.Sub(now))
 
 			logMu.Lock()
@@ -404,7 +410,7 @@ func RunTimer(vipConfig *viper.Viper) {
 				// defer oneJobMu.Unlock()  // 移除在循环中使用defer
 
 				if oneJob.Running && time.Since(oneJob.LastActive) > 5*time.Minute {
-					logf("检测到FRP服务静默超时，触发重启")
+					logf("检测到FRP服务静默超时，可能处于STOP状态，触发重启")
 					closeFrp(oneJob)
 					oneJob.LastActive = time.Now()
 					oneJobMu.Unlock()     // 手动释放锁
