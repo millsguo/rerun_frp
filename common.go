@@ -50,6 +50,7 @@ func (j *OneJob) setRunning(running bool) {
 }
 
 // 新增方法：安全获取运行状态
+// 使用原子操作检查运行状态，避免在启动过程中出现误判
 func (j *OneJob) isRunning() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -233,7 +234,7 @@ func StartFrpThings(oneJob *OneJob, vipConfig *viper.Viper) bool {
 		logf("启动失败:%v", oneJob.Err)
 		// 增加重试前的短暂等待，确保资源释放
 		logf("等待资源释放后重试...")
-		time.Sleep(1 * time.Second)
+		time.Sleep(2 * time.Second) // 增加等待时间确保资源完全释放
 		oneJob.scheduleRetry()
 		return false
 	}
@@ -441,7 +442,7 @@ func startFrp(oneJob *OneJob) {
 	oneJob.mu.Unlock()
 
 	// 在启动前增加延迟，确保之前的进程完全终止
-	time.Sleep(2 * time.Second)
+	time.Sleep(3 * time.Second) // 增加延迟时间确保之前的进程完全终止
 
 	stdout, err := cmder.StdoutPipe()
 	if err != nil {
@@ -488,24 +489,24 @@ func startFrp(oneJob *OneJob) {
 			// 修改日志扫描逻辑，增加特定错误检测
 			if strings.Contains(line, "i/o timeout") ||
 				strings.Contains(line, "connection refused") ||
-				strings.Contains(line, "no such host") ||
-				strings.Contains(strings.ToLower(line), "stop") {
-				logf("检测到连接错误或STOP状态，触发强制IP检查")
-				closeFrp(oneJob)
-				ipCacheMu.Lock()
-				ipCache = "" // 清空缓存强制重新获取IP
-				ipCacheMu.Unlock()
-				// 在新的goroutine中执行重试，避免死锁
-				logf("因连接错误或STOP状态触发重试机制")
-				go RunOnce(oneJob.vipConfig) // 需要将vipConfig传递到OneJob结构体中
+				strings.Contains(line, "no such host") {
+				logf("检测到连接错误，触发强制IP检查")
+				go func() {
+					// 在新的goroutine中执行重试，避免死锁
+					logf("因连接错误触发重试机制")
+					closeFrp(oneJob)
+					ipCacheMu.Lock()
+					ipCache = "" // 清空缓存强制重新获取IP
+					ipCacheMu.Unlock()
+					RunOnce(oneJob.vipConfig) // 需要将vipConfig传递到OneJob结构体中
+				}()
 			}
 			if strings.Contains(line, "retry") || strings.Contains(line, "error") {
 				logf("检测到错误关键词，准备重试...")
 				// 只有在不是由连接错误触发的情况下才安排重试
 				if !(strings.Contains(line, "i/o timeout") ||
 					strings.Contains(line, "connection refused") ||
-					strings.Contains(line, "no such host") ||
-					strings.Contains(strings.ToLower(line), "stop")) {
+					strings.Contains(line, "no such host")) {
 					oneJob.scheduleRetry()
 				}
 			}
@@ -581,12 +582,12 @@ func (j *OneJob) healthCheck() {
 			alive := j.isProcessAlive()
 			if !alive {
 				logf("健康检查：进程已停止，触发重启")
-				closeFrp(j)
-				ipCacheMu.Lock()
-				ipCache = ""
-				ipCacheMu.Unlock()
 				// 在新的goroutine中执行重试，避免死锁
 				go func() {
+					closeFrp(j)
+					ipCacheMu.Lock()
+					ipCache = ""
+					ipCacheMu.Unlock()
 					oneJobMu.Lock()
 					defer oneJobMu.Unlock()
 					logf("因健康检查失败触发重试")
@@ -600,12 +601,12 @@ func (j *OneJob) healthCheck() {
 			// 如果服务长时间没有活动（超过5分钟），可能处于STOP状态
 			if time.Since(j.LastActive) > 5*time.Minute {
 				logf("健康检查：FRP服务长时间无活动，可能处于STOP状态，触发重启")
-				closeFrp(j)
-				ipCacheMu.Lock()
-				ipCache = ""
-				ipCacheMu.Unlock()
 				// 在新的goroutine中执行重试，避免死锁
 				go func() {
+					closeFrp(j)
+					ipCacheMu.Lock()
+					ipCache = ""
+					ipCacheMu.Unlock()
 					oneJobMu.Lock()
 					defer oneJobMu.Unlock()
 					logf("因FRP服务STOP状态触发重试")

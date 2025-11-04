@@ -412,6 +412,9 @@ func RunTimer(vipConfig *viper.Viper) {
 				if oneJob.Running && time.Since(oneJob.LastActive) > 5*time.Minute {
 					logf("检测到FRP服务静默超时，可能处于STOP状态，触发重启")
 					closeFrp(oneJob)
+					ipCacheMu.Lock()
+					ipCache = "" // 清空缓存强制重新获取IP
+					ipCacheMu.Unlock()
 					oneJob.LastActive = time.Now()
 					oneJobMu.Unlock()     // 手动释放锁
 					go RunOnce(vipConfig) // 异步执行避免持有锁时间过长
