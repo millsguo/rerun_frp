@@ -21,20 +21,22 @@ import (
 )
 
 type OneJob struct {
-	Ctx               context.Context
-	Cmder             *exec.Cmd
-	Cancel            func()
-	Err               error
-	CmdLine           string
-	CmdArgs           []string
-	Running           bool
-	LastActive        time.Time
-	mu                sync.Mutex         // 保护所有字段
-	retryTimer        *time.Timer        // 重试定时器
-	retryCancel       context.CancelFunc // 取消重试
-	vipConfig         *viper.Viper       // 新增配置引用
-	retryCount        int
-	maxAllowedRetries int // 记录当前最大允许值
+	Ctx                  context.Context
+	Cmder                *exec.Cmd
+	Cancel               func()
+	Err                  error
+	CmdLine              string
+	CmdArgs              []string
+	Running              bool
+	LastActive           time.Time
+	mu                   sync.Mutex         // 保护所有字段
+	retryTimer           *time.Timer        // 重试定时器
+	retryCancel          context.CancelFunc // 取消重试
+	vipConfig            *viper.Viper       // 新增配置引用
+	retryCount           int
+	maxAllowedRetries    int         // 记录当前最大允许值
+	connectionFailure    bool        // 标记是否因连接失败触发的重试
+	connectionRetryTimer *time.Timer // 连接失败重试定时器
 }
 
 // 新增方法：安全设置运行状态
@@ -102,14 +104,25 @@ func (j *OneJob) scheduleRetry() {
 		return
 	}
 
-	// 标准指数退避算法（含随机因子）
-	baseDelay := 3 * time.Minute
-	maxDelay := 60 * time.Minute
-	delay := baseDelay * time.Duration(1<<uint(j.retryCount))
-	delay = time.Duration(float64(delay) * (1 + 0.2*rand.Float64())) // 增加20%随机抖动
+	// 如果是连接失败，使用5分钟固定间隔重试
+	var delay time.Duration
+	if j.connectionFailure {
+		delay = 5 * time.Minute
+		logf("连接失败重试将在 %.1f 分钟后触发 (配置上限:%d)",
+			delay.Minutes(), j.maxAllowedRetries)
+	} else {
+		// 标准指数退避算法（含随机因子）
+		baseDelay := 3 * time.Minute
+		maxDelay := 60 * time.Minute
+		delay = baseDelay * time.Duration(1<<uint(j.retryCount))
+		delay = time.Duration(float64(delay) * (1 + 0.2*rand.Float64())) // 增加20%随机抖动
 
-	if delay > maxDelay {
-		delay = maxDelay
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+
+		logf("第 %d 次重试将在 %.1f 分钟后触发 (配置上限:%d)",
+			j.retryCount+1, delay.Minutes(), j.maxAllowedRetries)
 	}
 
 	// 更新计数器前检查
@@ -117,9 +130,6 @@ func (j *OneJob) scheduleRetry() {
 		j.retryTimer.Stop()
 	}
 	j.retryCount++
-
-	logf("第 %d 次重试将在 %.1f 分钟后触发 (配置上限:%d)",
-		j.retryCount, delay.Minutes(), j.maxAllowedRetries)
 
 	// 创建带取消机制的重试上下文
 	ctx, cancel := context.WithCancel(context.Background())
@@ -135,16 +145,89 @@ func (j *OneJob) scheduleRetry() {
 			return
 		}
 
-		// 执行前清空IP缓存
-		ipCacheMu.Lock()
-		ipCache = ""
-		ipCacheMu.Unlock()
+		// 如果是连接失败触发的重试，检查IP是否变更
+		if j.connectionFailure {
+			domainName := j.vipConfig.GetString("CheckDomainName")
+			dnsAddress := j.vipConfig.GetString("DnsAddress")
 
-		logf("开始执行第 %d 次重试", j.retryCount)
-		// 在重试前增加更长的等待时间，确保资源完全释放
-		logf("等待更长时间以确保资源完全释放...")
-		time.Sleep(5 * time.Second) // 增加等待时间从2秒到5秒
-		RunOnce(j.vipConfig)
+			ipTmp, err := GetIP(domainName, dnsAddress)
+			if err != nil {
+				logf("连接失败重试时获取远程IP失败，错误信息: %v", err)
+				// 继续重试
+				j.scheduleRetry()
+				return
+			}
+
+			ipCacheMu.Lock()
+			oldIP := ipCache
+			ipChanged := (oldIP != ipTmp)
+			if ipChanged {
+				logf("检测到IP变更，原IP: %s, 新IP: %s", oldIP, ipTmp)
+				ipCache = ipTmp
+			}
+			ipCacheMu.Unlock()
+
+			// 如果IP变更了，需要重启FRP服务
+			if ipChanged {
+				logf("IP已变更，重启FRP服务中...")
+				// 关闭当前FRP服务
+				closeFrp(j)
+
+				// 确保资源释放完成
+				logf("等待资源释放...")
+				time.Sleep(5 * time.Second)
+
+				// 初始化FRP参数
+				nowDir, _ := os.Getwd()
+				if !InitFrpArgs(nowDir, j) {
+					logf("重启时初始化失败！")
+					j.scheduleRetry()
+					return
+				}
+
+				// 启动新的FRP服务
+				logf("开始启动新的FRP服务...")
+				StartFrpThings(j, j.vipConfig)
+				logf("FRP服务重启流程执行完成")
+
+				// 重置连接失败标记
+				j.mu.Lock()
+				j.connectionFailure = false
+				j.retryCount = 0
+				j.mu.Unlock()
+				return
+			} else {
+				logf("IP未变更 (%s)，尝试重新连接", ipTmp)
+				// IP未变更，尝试重新连接
+				closeFrp(j)
+
+				// 等待资源释放
+				time.Sleep(3 * time.Second)
+
+				// 初始化FRP参数
+				nowDir, _ := os.Getwd()
+				if !InitFrpArgs(nowDir, j) {
+					logf("重启时初始化失败！")
+					j.scheduleRetry()
+					return
+				}
+
+				// 启动FRP服务
+				StartFrpThings(j, j.vipConfig)
+				return
+			}
+		} else {
+			// 执行前清空IP缓存
+			ipCacheMu.Lock()
+			ipCache = ""
+			ipCacheMu.Unlock()
+
+			logf("开始执行第 %d 次重试", j.retryCount)
+			// 在重试前增加更长的等待时间，确保资源完全释放
+			logf("等待更长时间以确保资源完全释放...")
+			time.Sleep(5 * time.Second) // 增加等待时间从2秒到5秒
+			RunOnce(j.vipConfig)
+		}
 	})
 
 	// 上下文清理协程
@@ -154,6 +237,115 @@ func (j *OneJob) scheduleRetry() {
 		j.retryTimer = nil
 		j.mu.Unlock()
 	}()
+}
+
+// 新增方法：标记连接失败并调度重试
+func (j *OneJob) scheduleConnectionFailureRetry() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+
+	// 停止现有的连接重试定时器
+	if j.connectionRetryTimer != nil {
+		j.connectionRetryTimer.Stop()
+	}
+
+	// 设置连接失败标记
+	j.connectionFailure = true
+
+	// 创建新的5分钟定时器
+	j.connectionRetryTimer = time.AfterFunc(5*time.Minute, func() {
+		oneJobMu.Lock()
+		defer oneJobMu.Unlock()
+
+		// 检查运行状态
+		if !j.isRunning() {
+			logf("FRP服务未运行，放弃连接失败重试")
+			return
+		}
+
+		// 获取配置
+		j.mu.Lock()
+		vipConfig := j.vipConfig
+		j.mu.Unlock()
+
+		if vipConfig == nil {
+			logf("配置为空，无法执行连接失败重试")
+			return
+		}
+
+		domainName := vipConfig.GetString("CheckDomainName")
+		dnsAddress := vipConfig.GetString("DnsAddress")
+
+		ipTmp, err := GetIP(domainName, dnsAddress)
+		if err != nil {
+			logf("连接失败重试时获取远程IP失败，错误信息: %v", err)
+			// 继续安排下一次重试
+			j.scheduleConnectionFailureRetry()
+			return
+		}
+
+		ipCacheMu.Lock()
+		oldIP := ipCache
+		ipChanged := (oldIP != ipTmp)
+		if ipChanged {
+			logf("检测到IP变更，原IP: %s, 新IP: %s", oldIP, ipTmp)
+			ipCache = ipTmp
+		}
+		ipCacheMu.Unlock()
+
+		// 如果IP变更了，需要重启FRP服务
+		if ipChanged {
+			logf("IP已变更，重启FRP服务中...")
+			// 关闭当前FRP服务
+			closeFrp(j)
+
+			// 确保资源释放完成
+			logf("等待资源释放...")
+			time.Sleep(5 * time.Second)
+
+			// 初始化FRP参数
+			nowDir, _ := os.Getwd()
+			if !InitFrpArgs(nowDir, j) {
+				logf("重启时初始化失败！")
+				// 继续安排下一次重试
+				j.scheduleConnectionFailureRetry()
+				return
+			}
+
+			// 启动新的FRP服务
+			logf("开始启动新的FRP服务...")
+			StartFrpThings(j, vipConfig)
+			logf("FRP服务重启流程执行完成")
+
+			// 重置连接失败标记
+			j.mu.Lock()
+			j.connectionFailure = false
+			j.mu.Unlock()
+			return
+		} else {
+			logf("IP未变更 (%s)，尝试重新连接", ipTmp)
+			// IP未变更，尝试重新连接
+			closeFrp(j)
+
+			// 等待资源释放
+			time.Sleep(3 * time.Second)
+
+			// 初始化FRP参数
+			nowDir, _ := os.Getwd()
+			if !InitFrpArgs(nowDir, j) {
+				logf("重启时初始化失败！")
+				// 继续安排下一次重试
+				j.scheduleConnectionFailureRetry()
+				return
+			}
+
+			// 启动FRP服务
+			StartFrpThings(j, vipConfig)
+			return
+		}
+	})
+
+	logf("连接失败，将在5分钟后检查并重试")
 }
 
 // 新增资源清理方法
@@ -166,8 +358,13 @@ func (j *OneJob) cleanupRetryResources() {
 		j.retryTimer.Stop()
 		j.retryTimer = nil
 	}
+	if j.connectionRetryTimer != nil {
+		j.connectionRetryTimer.Stop()
+		j.connectionRetryTimer = nil
+	}
 	j.retryCount = 0 // 重置计数器
 	j.maxAllowedRetries = 0
+	j.connectionFailure = false // 重置连接失败标记
 	logf("重试资源已清理")
 }
 
@@ -421,6 +618,7 @@ func startFrp(oneJob *OneJob) {
 	oneJob.mu.Lock()
 	oneJob.retryCount = 0
 	oneJob.maxAllowedRetries = 0
+	oneJob.connectionFailure = false // 重置连接失败标记
 	oneJob.Ctx, oneJob.Cancel = context.WithCancel(context.Background())
 	oneJob.mu.Unlock()
 
@@ -489,24 +687,25 @@ func startFrp(oneJob *OneJob) {
 			// 修改日志扫描逻辑，增加特定错误检测
 			if strings.Contains(line, "i/o timeout") ||
 				strings.Contains(line, "connection refused") ||
-				strings.Contains(line, "no such host") {
+				strings.Contains(line, "no such host") ||
+				strings.Contains(line, "connect: network is unreachable") ||
+				strings.Contains(line, "failed to connect to server") {
 				logf("检测到连接错误，触发强制IP检查")
-				go func() {
-					// 在新的goroutine中执行重试，避免死锁
-					logf("因连接错误触发重试机制")
-					closeFrp(oneJob)
-					ipCacheMu.Lock()
-					ipCache = "" // 清空缓存强制重新获取IP
-					ipCacheMu.Unlock()
-					RunOnce(oneJob.vipConfig) // 需要将vipConfig传递到OneJob结构体中
-				}()
+				// 使用互斥锁安全地访问oneJob
+				oneJobMu.Lock()
+				if oneJob != nil {
+					oneJob.scheduleConnectionFailureRetry()
+				}
+				oneJobMu.Unlock()
 			}
 			if strings.Contains(line, "retry") || strings.Contains(line, "error") {
 				logf("检测到错误关键词，准备重试...")
 				// 只有在不是由连接错误触发的情况下才安排重试
 				if !(strings.Contains(line, "i/o timeout") ||
 					strings.Contains(line, "connection refused") ||
-					strings.Contains(line, "no such host")) {
+					strings.Contains(line, "no such host") ||
+					strings.Contains(line, "connect: network is unreachable") ||
+					strings.Contains(line, "failed to connect to server")) {
 					oneJob.scheduleRetry()
 				}
 			}
@@ -550,7 +749,7 @@ func startFrp(oneJob *OneJob) {
 			} else {
 				logf("进程正常退出 (运行时长%s)", duration)
 				// 新增正常退出后的保活机制
-				if oneJob.vipConfig.GetBool("AutoRestart") {
+				if oneJob.vipConfig != nil && oneJob.vipConfig.GetBool("AutoRestart") {
 					oneJob.scheduleRetry()
 				}
 			}

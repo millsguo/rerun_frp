@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -615,4 +617,39 @@ func main() {
 	logf("正在关闭日志系统...")
 	closeLogger()
 	logf("程序已正常退出")
+}
+
+// 日志处理
+func scanOutput(input io.Reader, name string) {
+	scanner := bufio.NewScanner(input)
+	for scanner.Scan() {
+		line := scanner.Text()
+		logf("[FRP-%s] %s\n", name, line)
+		oneJob.UpdateLastActive()
+		// 修改日志扫描逻辑，增加特定错误检测
+		if strings.Contains(line, "i/o timeout") ||
+			strings.Contains(line, "connection refused") ||
+			strings.Contains(line, "no such host") ||
+			strings.Contains(line, "connect: network is unreachable") ||
+			strings.Contains(line, "failed to connect to server") {
+			logf("检测到连接错误，触发强制IP检查")
+			// 使用互斥锁安全地访问oneJob
+			oneJobMu.Lock()
+			if oneJob != nil {
+				oneJob.scheduleConnectionFailureRetry()
+			}
+			oneJobMu.Unlock()
+		}
+		if strings.Contains(line, "retry") || strings.Contains(line, "error") {
+			logf("检测到错误关键词，准备重试...")
+			// 只有在不是由连接错误触发的情况下才安排重试
+			if !(strings.Contains(line, "i/o timeout") ||
+				strings.Contains(line, "connection refused") ||
+				strings.Contains(line, "no such host") ||
+				strings.Contains(line, "connect: network is unreachable") ||
+				strings.Contains(line, "failed to connect to server")) {
+				oneJob.scheduleRetry()
+			}
+		}
+	}
 }
