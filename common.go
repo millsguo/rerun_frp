@@ -20,6 +20,9 @@ import (
 	"github.com/spf13/viper"
 )
 
+// 添加 fmt 包导入
+import "fmt"
+
 type OneJob struct {
 	Ctx                  context.Context
 	Cmder                *exec.Cmd
@@ -179,6 +182,12 @@ func (j *OneJob) scheduleRetry() {
 
 				// 初始化FRP参数
 				nowDir, _ := os.Getwd()
+				// 更新FRPC配置文件中的服务器地址
+				if err := updateFRPCConfig(nowDir, ipTmp); err != nil {
+					logf("更新FRPC配置文件失败: %v", err)
+					j.scheduleRetry()
+					return
+				}
 				if !InitFrpArgs(nowDir, j) {
 					logf("重启时初始化失败！")
 					j.scheduleRetry()
@@ -305,6 +314,13 @@ func (j *OneJob) scheduleConnectionFailureRetry() {
 
 			// 初始化FRP参数
 			nowDir, _ := os.Getwd()
+			// 更新FRPC配置文件中的服务器地址
+			if err := updateFRPCConfig(nowDir, ipTmp); err != nil {
+				logf("更新FRPC配置文件失败: %v", err)
+				// 继续安排下一次重试
+				j.scheduleConnectionFailureRetry()
+				return
+			}
 			if !InitFrpArgs(nowDir, j) {
 				logf("重启时初始化失败！")
 				// 继续安排下一次重试
@@ -413,6 +429,44 @@ func InitFrpArgs(nowDir string, oneJob *OneJob) bool {
 	}
 	logf("FRP参数初始化完成: %s %v", oneJob.CmdLine, oneJob.CmdArgs)
 	return true
+}
+
+// 新增函数：更新FRPC配置文件中的服务器地址
+func updateFRPCConfig(nowDir string, newIP string) error {
+	configPath := filepath.Join(nowDir, "/frpClient/frpc.toml")
+
+	// 读取配置文件
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("读取FRPC配置文件失败: %v", err)
+	}
+
+	// 将内容按行分割
+	lines := strings.Split(string(content), "\n")
+
+	// 查找并替换 server_addr 行
+	for i, line := range lines {
+		// 查找 server_addr 配置行
+		if strings.HasPrefix(strings.TrimSpace(line), "server_addr") {
+			// 替换IP地址部分
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				// 保留等号前的部分和等号，只替换IP地址
+				lines[i] = strings.TrimSpace(parts[0]) + " = " + newIP
+				logf("已更新FRPC配置文件中的服务器地址: %s", newIP)
+				break
+			}
+		}
+	}
+
+	// 将修改后的内容写回文件
+	newContent := strings.Join(lines, "\n")
+	err = os.WriteFile(configPath, []byte(newContent), 0644)
+	if err != nil {
+		return fmt.Errorf("写入FRPC配置文件失败: %v", err)
+	}
+
+	return nil
 }
 
 func StartFrpThings(oneJob *OneJob, vipConfig *viper.Viper) bool {

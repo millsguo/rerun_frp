@@ -372,6 +372,12 @@ func RunOnce(vipConfig *viper.Viper) {
 		logf("等待资源释放...")
 		time.Sleep(5 * time.Second)
 
+		// 更新FRPC配置文件中的服务器地址
+		if err := updateFRPCConfig(nowDir, ipTmp); err != nil {
+			logf("更新FRPC配置文件失败: %v", err)
+			return
+		}
+
 		// 新增初始化检查
 		nowDir, _ = os.Getwd()
 		logf("重新初始化FRP参数...")
