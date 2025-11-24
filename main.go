@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -635,63 +633,4 @@ func main() {
 	logf("正在关闭日志系统...")
 	closeLogger()
 	logf("程序已正常退出")
-}
-
-// 日志处理
-func scanOutput(input io.Reader, name string) {
-	scanner := bufio.NewScanner(input)
-	for scanner.Scan() {
-		line := scanner.Text()
-		logf("[FRP-%s] %s\n", name, line)
-		oneJob.UpdateLastActive()
-		// 修改日志扫描逻辑，增加特定错误检测
-		if strings.Contains(line, "i/o timeout") ||
-			strings.Contains(line, "connection refused") ||
-			strings.Contains(line, "no such host") ||
-			strings.Contains(line, "connect: network is unreachable") ||
-			strings.Contains(line, "failed to connect to server") {
-			logf("检测到连接错误，触发强制IP检查")
-			// 使用互斥锁安全地访问oneJob
-			oneJobMu.Lock()
-			if oneJob != nil {
-				// 获取当前配置中的域名和DNS地址
-				if oneJob.vipConfig != nil {
-					domainName := oneJob.vipConfig.GetString("CheckDomainName")
-					dnsAddress := oneJob.vipConfig.GetString("DnsAddress")
-
-					// 获取当前IP
-					ipTmp, err := GetIP(domainName, dnsAddress)
-					if err == nil {
-						// 检查FRPS服务器是否可达
-						if !isFRPSAvailable(ipTmp, 7000) {
-							logf("FRPS服务器 %s:7000 不可达，5分钟后再次检查", ipTmp)
-							// 安排5分钟后再次检查
-							time.AfterFunc(5*time.Minute, func() {
-								oneJobMu.Lock()
-								defer oneJobMu.Unlock()
-								if oneJob != nil && oneJob.vipConfig != nil {
-									RunOnce(oneJob.vipConfig)
-								}
-							})
-							oneJobMu.Unlock()
-							return
-						}
-					}
-				}
-				oneJob.scheduleConnectionFailureRetry()
-			}
-			oneJobMu.Unlock()
-		}
-		if strings.Contains(line, "retry") || strings.Contains(line, "error") {
-			logf("检测到错误关键词，准备重试...")
-			// 只有在不是由连接错误触发的情况下才安排重试
-			if !(strings.Contains(line, "i/o timeout") ||
-				strings.Contains(line, "connection refused") ||
-				strings.Contains(line, "no such host") ||
-				strings.Contains(line, "connect: network is unreachable") ||
-				strings.Contains(line, "failed to connect to server")) {
-				oneJob.scheduleRetry()
-			}
-		}
-	}
 }
