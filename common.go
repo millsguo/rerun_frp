@@ -1048,7 +1048,12 @@ func isFRPSAvailable(ip string, port int) bool {
 		logf("FRPS服务器 %s 不可达: %v", address, err)
 		return false
 	}
-	defer conn.Close()
+	defer func(conn net.Conn) {
+		err := conn.Close()
+		if err != nil {
+			logf("FRPS服务器 %s 不可达: %v", address, err)
+		}
+	}(conn)
 	logf("FRPS服务器 %s 可达", address)
 	return true
 }
