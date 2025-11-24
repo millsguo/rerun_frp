@@ -342,6 +342,18 @@ func RunOnce(vipConfig *viper.Viper) {
 	}
 
 	if ipTmp != ipCache {
+		// 检查FRPS服务器是否可达
+		if !isFRPSAvailable(ipTmp, 7000) {
+			logf("FRPS服务器 %s:7000 不可达，5分钟后再次检查", ipTmp)
+			// 安排5分钟后再次检查
+			time.AfterFunc(5*time.Minute, func() {
+				oneJobMu.Lock()
+				defer oneJobMu.Unlock()
+				RunOnce(vipConfig)
+			})
+			return
+		}
+
 		logf("IP 已改变, 原IP: %s, 新IP: %s，重启FRP服务中...", ipCache, ipTmp)
 
 		// 不再在锁内调用closeFrp，避免死锁
@@ -642,6 +654,30 @@ func scanOutput(input io.Reader, name string) {
 			// 使用互斥锁安全地访问oneJob
 			oneJobMu.Lock()
 			if oneJob != nil {
+				// 获取当前配置中的域名和DNS地址
+				if oneJob.vipConfig != nil {
+					domainName := oneJob.vipConfig.GetString("CheckDomainName")
+					dnsAddress := oneJob.vipConfig.GetString("DnsAddress")
+
+					// 获取当前IP
+					ipTmp, err := GetIP(domainName, dnsAddress)
+					if err == nil {
+						// 检查FRPS服务器是否可达
+						if !isFRPSAvailable(ipTmp, 7000) {
+							logf("FRPS服务器 %s:7000 不可达，5分钟后再次检查", ipTmp)
+							// 安排5分钟后再次检查
+							time.AfterFunc(5*time.Minute, func() {
+								oneJobMu.Lock()
+								defer oneJobMu.Unlock()
+								if oneJob != nil && oneJob.vipConfig != nil {
+									RunOnce(oneJob.vipConfig)
+								}
+							})
+							oneJobMu.Unlock()
+							return
+						}
+					}
+				}
 				oneJob.scheduleConnectionFailureRetry()
 			}
 			oneJobMu.Unlock()

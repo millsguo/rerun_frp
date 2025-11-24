@@ -161,6 +161,13 @@ func (j *OneJob) scheduleRetry() {
 				return
 			}
 
+			// 检查FRPS服务器是否可达
+			if !isFRPSAvailable(ipTmp, 7000) {
+				logf("FRPS服务器 %s:7000 不可达，5分钟后再次检查", ipTmp)
+				j.scheduleRetry()
+				return
+			}
+
 			ipCacheMu.Lock()
 			oldIP := ipCache
 			ipChanged := (oldIP != ipTmp)
@@ -289,6 +296,13 @@ func (j *OneJob) scheduleConnectionFailureRetry() {
 		if err != nil {
 			logf("连接失败重试时获取远程IP失败，错误信息: %v", err)
 			// 继续安排下一次重试
+			j.scheduleConnectionFailureRetry()
+			return
+		}
+
+		// 检查FRPS服务器是否可达
+		if !isFRPSAvailable(ipTmp, 7000) {
+			logf("FRPS服务器 %s:7000 不可达，5分钟后再次检查", ipTmp)
 			j.scheduleConnectionFailureRetry()
 			return
 		}
@@ -748,6 +762,32 @@ func startFrp(oneJob *OneJob) {
 				// 使用互斥锁安全地访问oneJob
 				oneJobMu.Lock()
 				if oneJob != nil {
+					// 获取当前配置中的域名和DNS地址
+					if oneJob.vipConfig != nil {
+						domainName := oneJob.vipConfig.GetString("CheckDomainName")
+						dnsAddress := oneJob.vipConfig.GetString("DnsAddress")
+
+						// 获取当前IP
+						ipTmp, err := GetIP(domainName, dnsAddress)
+						if err == nil {
+							// 检查FRPS服务器是否可达
+							if !isFRPSAvailable(ipTmp, 7000) {
+								logf("FRPS服务器 %s:7000 不可达，5分钟后再次检查", ipTmp)
+								// 安排5分钟后再次检查
+								time.AfterFunc(5*time.Minute, func() {
+									oneJobMu.Lock()
+									defer oneJobMu.Unlock()
+									if oneJob != nil && oneJob.vipConfig != nil {
+										// 创建临时配置避免锁的问题
+										vipConfig := oneJob.vipConfig
+										go RunOnce(vipConfig)
+									}
+								})
+								oneJobMu.Unlock()
+								return
+							}
+						}
+					}
 					oneJob.scheduleConnectionFailureRetry()
 				}
 				oneJobMu.Unlock()
@@ -998,4 +1038,17 @@ func (j *OneJob) UpdateLastActive() {
 	if oneJob != nil {
 		oneJob.LastActive = time.Now()
 	}
+}
+
+// 新增函数：检测FRPS的IP地址和端口是否可用
+func isFRPSAvailable(ip string, port int) bool {
+	address := fmt.Sprintf("%s:%d", ip, port)
+	conn, err := net.DialTimeout("tcp", address, 10*time.Second)
+	if err != nil {
+		logf("FRPS服务器 %s 不可达: %v", address, err)
+		return false
+	}
+	defer conn.Close()
+	logf("FRPS服务器 %s 可达", address)
+	return true
 }
