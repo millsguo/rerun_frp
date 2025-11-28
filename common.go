@@ -794,15 +794,22 @@ func startFrp(oneJob *OneJob) {
 			}
 			if strings.Contains(line, "retry") || strings.Contains(line, "error") {
 				logf("检测到错误关键词，准备重试...")
-				// 只有在不是由连接错误触发的情况下才安排重试
-				if !(strings.Contains(line, "i/o timeout") ||
+				// 检查是否为连接错误
+				isConnectionError := strings.Contains(line, "i/o timeout") ||
 					strings.Contains(line, "connection refused") ||
 					strings.Contains(line, "no such host") ||
 					strings.Contains(line, "connect: network is unreachable") ||
-					strings.Contains(line, "failed to connect to server")) {
+					strings.Contains(line, "failed to connect to server")
+
+				if isConnectionError {
+					// 对于连接错误，使用专门的连接失败重试机制
+					oneJob.scheduleConnectionFailureRetry()
+				} else {
+					// 其他错误使用通用重试机制
 					oneJob.scheduleRetry()
 				}
 			}
+
 		}
 	}
 
@@ -833,12 +840,21 @@ func startFrp(oneJob *OneJob) {
 				}
 				logf("进程异常退出 (code:%d 时长%s): %v", exitCode, duration, err)
 
+				// 检查是否是连接错误导致的退出
+				isConnectionError := (exitCode == 1) && (duration > 5*time.Second && duration < 30*time.Second)
+
 				// 新增统一重试策略
 				if duration < 30*time.Second || exitCode != 0 {
 					logf("触发自动重试机制")
 					// 在重试之前增加等待时间，确保资源完全释放
 					time.Sleep(3 * time.Second)
-					oneJob.scheduleRetry()
+					if isConnectionError {
+						// 对于连接错误，使用连接失败重试机制
+						oneJob.scheduleConnectionFailureRetry()
+					} else {
+						// 其他错误使用通用重试机制
+						oneJob.scheduleRetry()
+					}
 				}
 			} else {
 				logf("进程正常退出 (运行时长%s)", duration)
