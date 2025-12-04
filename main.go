@@ -408,7 +408,9 @@ func RunOnce(vipConfig *viper.Viper) {
 		StartFrpThings(oneJob, vipConfig)
 		logf("FRP服务重启流程执行完成")
 	} else {
-		logf("IP未发生变化: %s", ipTmp)
+		// 即使IP未变化，也更新缓存以确保下次比较正确
+		ipCache = ipTmp
+		logf("IP未发生变化，但仍更新缓存: %s", ipTmp)
 	}
 }
 
