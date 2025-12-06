@@ -320,35 +320,39 @@ func (j *OneJob) scheduleConnectionFailureRetry() {
 		}
 		ipCacheMu.Unlock()
 
-		// 无论IP是否变更，都需要重启FRP服务
-		logf("重启FRP服务中...")
-		// 关闭当前FRP服务
-		closeFrp(j)
+		// 如果IP发生了变更，则需要重启FRP服务
+		if ipChanged {
+			logf("IP已变更，重启FRP服务中...")
+			// 关闭当前FRP服务
+			closeFrp(j)
 
-		// 确保资源释放完成
-		logf("等待资源释放...")
-		time.Sleep(5 * time.Second)
+			// 确保资源释放完成
+			logf("等待资源释放...")
+			time.Sleep(5 * time.Second)
 
-		// 初始化FRP参数
-		nowDir, _ := os.Getwd()
-		// 更新FRPC配置文件中的服务器地址
-		if err := updateFRPCConfig(nowDir, ipTmp); err != nil {
-			logf("更新FRPC配置文件失败: %v", err)
-			// 继续安排下一次重试
-			j.scheduleConnectionFailureRetry()
-			return
+			// 初始化FRP参数
+			nowDir, _ := os.Getwd()
+			// 更新FRPC配置文件中的服务器地址
+			if err := updateFRPCConfig(nowDir, ipTmp); err != nil {
+				logf("更新FRPC配置文件失败: %v", err)
+				// 继续安排下一次重试
+				j.scheduleConnectionFailureRetry()
+				return
+			}
+			if !InitFrpArgs(nowDir, j) {
+				logf("重启时初始化失败！")
+				// 继续安排下一次重试
+				j.scheduleConnectionFailureRetry()
+				return
+			}
+
+			// 启动新的FRP服务
+			logf("开始启动新的FRP服务...")
+			StartFrpThings(j, vipConfig)
+			logf("FRP服务重启流程执行完成")
+		} else {
+			logf("IP未变更，FRPC客户端应能自行重新连接")
 		}
-		if !InitFrpArgs(nowDir, j) {
-			logf("重启时初始化失败！")
-			// 继续安排下一次重试
-			j.scheduleConnectionFailureRetry()
-			return
-		}
-
-		// 启动新的FRP服务
-		logf("开始启动新的FRP服务...")
-		StartFrpThings(j, vipConfig)
-		logf("FRP服务重启流程执行完成")
 
 		// 重置连接失败标记
 		j.mu.Lock()
@@ -740,87 +744,42 @@ func startFrp(oneJob *OneJob) {
 				strings.Contains(line, "no such host") ||
 				strings.Contains(line, "connect: network is unreachable") ||
 				strings.Contains(line, "failed to connect to server") {
-				logf("检测到连接错误，触发强制IP检查")
-				// 使用互斥锁安全地访问oneJob
+				logf("检测到连接错误，等待FRPC客户端重新连接...")
+				// 不再立即触发IP检查和重启，因为FRPC客户端有自己的重连机制
+				// 我们只需要更新缓存中的IP地址，并等待FRPC客户端自行重新连接
 				oneJobMu.Lock()
-				if oneJob != nil {
-					// 获取当前配置中的域名和DNS地址
-					if oneJob.vipConfig != nil {
-						domainName := oneJob.vipConfig.GetString("CheckDomainName")
-						dnsAddress := oneJob.vipConfig.GetString("DnsAddress")
+				if oneJob != nil && oneJob.vipConfig != nil {
+					domainName := oneJob.vipConfig.GetString("CheckDomainName")
+					dnsAddress := oneJob.vipConfig.GetString("DnsAddress")
 
-						// 获取当前IP
-						ipTmp, err := GetIP(domainName, dnsAddress)
-						if err == nil {
-							// 检查FRPS服务器是否可达
-							if !isFRPSAvailable(ipTmp, 7000) {
-								logf("FRPS服务器 %s:7000 不可达，5分钟后再次检查", ipTmp)
-								// 安排5分钟后再次检查
-								time.AfterFunc(5*time.Minute, func() {
-									oneJobMu.Lock()
-									defer oneJobMu.Unlock()
-									if oneJob != nil && oneJob.vipConfig != nil {
-										// 创建临时配置避免锁的问题
-										vipConfig := oneJob.vipConfig
-										go RunOnce(vipConfig)
-									}
-								})
-								oneJobMu.Unlock()
-								return
-							} else {
-								// 如果服务器可达，立即更新IP并重启FRP服务
-								logf("FRPS服务器 %s:7000 可达，立即更新IP并重启FRP服务", ipTmp)
-								ipCacheMu.Lock()
-								oldIP := ipCache
-								ipChanged := (oldIP != ipTmp)
-								if ipChanged {
-									logf("检测到IP变更，原IP: %s, 新IP: %s", oldIP, ipTmp)
-									ipCache = ipTmp
-								} else {
-									// 即使IP未变更，也需要更新缓存以确保下次比较正确
-									ipCache = ipTmp
-									logf("即使IP未变更，也更新缓存: %s", ipTmp)
-								}
-								ipCacheMu.Unlock()
+					// 获取当前最新的IP
+					ipTmp, err := GetIP(domainName, dnsAddress)
+					if err == nil {
+						// 更新IP缓存，但不立即重启服务
+						ipCacheMu.Lock()
+						oldIP := ipCache
+						if oldIP != ipTmp {
+							logf("检测到IP变更，原IP: %s, 新IP: %s", oldIP, ipTmp)
+						} else {
+							logf("IP未变更: %s", ipTmp)
+						}
+						ipCache = ipTmp
+						ipCacheMu.Unlock()
 
-								// 无论IP是否变更，都需要重启FRP服务
-								logf("重启FRP服务中...")
-								oneJobMu.Unlock() // 先解锁避免死锁
-
-								// 关闭当前FRP服务
-								closeFrp(oneJob)
-
-								// 确保资源释放完成
-								logf("等待资源释放...")
-								time.Sleep(5 * time.Second)
-
-								// 初始化FRP参数
-								nowDir, _ := os.Getwd()
-								// 更新FRPC配置文件中的服务器地址
-								if err := updateFRPCConfig(nowDir, ipTmp); err != nil {
-									logf("更新FRPC配置文件失败: %v", err)
-									oneJob.scheduleRetry()
-									return
-								}
-								if !InitFrpArgs(nowDir, oneJob) {
-									logf("重启时初始化失败！")
-									oneJob.scheduleRetry()
-									return
-								}
-
-								// 启动新的FRP服务
-								logf("开始启动新的FRP服务...")
-								StartFrpThings(oneJob, oneJob.vipConfig)
-								logf("FRP服务重启流程执行完成")
-								return
-							}
+						// 更新FRPC配置文件中的服务器地址
+						nowDir, _ := os.Getwd()
+						if err := updateFRPCConfig(nowDir, ipTmp); err != nil {
+							logf("更新FRPC配置文件失败: %v", err)
+						} else {
+							logf("已更新FRPC配置文件中的服务器地址为: %s", ipTmp)
 						}
 					}
-					oneJob.scheduleConnectionFailureRetry()
 				}
 				oneJobMu.Unlock()
-			}
-			if strings.Contains(line, "retry") || strings.Contains(line, "error") {
+
+				// 调度连接失败重试而不是立即执行
+				oneJob.scheduleConnectionFailureRetry()
+			} else if strings.Contains(line, "retry") || strings.Contains(line, "error") {
 				logf("检测到错误关键词，准备重试...")
 				// 检查是否为连接错误
 				isConnectionError := strings.Contains(line, "i/o timeout") ||
@@ -837,7 +796,6 @@ func startFrp(oneJob *OneJob) {
 					oneJob.scheduleRetry()
 				}
 			}
-
 		}
 	}
 
