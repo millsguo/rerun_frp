@@ -2,3 +2,5 @@ CheckDomainName: google.com
 DnsAddress: 8.8.8.8
 LocalProxyPort: 5269
 LocalSocks5Port: 5270
+# AutoRestart: true  # 可选配置，默认为 false
+# MaxRetries: 3      # 可选配置，默认重试 3 次，最大 100 次

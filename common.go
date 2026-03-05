@@ -107,8 +107,10 @@ func (j *OneJob) scheduleRetry() {
 		return
 	}
 
-	// 如果是连接失败，使用5分钟固定间隔重试
+	// 如果是连接失败，使用 5 分钟固定间隔重试
 	var delay time.Duration
+	isImmediateRetry := false // 标记是否需要立即重试
+
 	if j.connectionFailure {
 		delay = 5 * time.Minute
 		logf("连接失败重试将在 %.1f 分钟后触发 (配置上限:%d)",
@@ -118,25 +120,46 @@ func (j *OneJob) scheduleRetry() {
 		baseDelay := 3 * time.Minute
 		maxDelay := 60 * time.Minute
 		delay = baseDelay * time.Duration(1<<uint(j.retryCount))
-		delay = time.Duration(float64(delay) * (1 + 0.2*rand.Float64())) // 增加20%随机抖动
+		delay = time.Duration(float64(delay) * (1 + 0.2*rand.Float64())) // 增加 20% 随机抖动
 
 		if delay > maxDelay {
 			delay = maxDelay
 		}
 
-		logf("第 %d 次重试将在 %.1f 分钟后触发 (配置上限:%d)",
-			j.retryCount+1, delay.Minutes(), j.maxAllowedRetries)
+		// 首次重试立即执行
+		if j.retryCount == 0 {
+			isImmediateRetry = true
+			logf("首次重试，立即执行...")
+		} else {
+			logf("第 %d 次重试将在 %.1f 分钟后触发 (配置上限:%d)",
+				j.retryCount+1, delay.Minutes(), j.maxAllowedRetries)
+		}
+	}
+
+	// 如果是首次重试且非连接失败，立即执行（无延迟）
+	if isImmediateRetry {
+		// 先增加计数器
+		j.retryCount++
+		// 直接执行 RunOnce，不使用定时器
+		go func() {
+			oneJobMu.Lock()
+			defer oneJobMu.Unlock()
+			RunOnce(j.vipConfig)
+		}()
+		return
 	}
 
 	// 更新计数器前检查
 	if j.retryTimer != nil {
 		j.retryTimer.Stop()
 	}
-	j.retryCount++
 
 	// 创建带取消机制的重试上下文
 	ctx, cancel := context.WithCancel(context.Background())
 	j.retryCancel = cancel
+
+	// 先增加计数器再设置定时器
+	j.retryCount++
 
 	j.retryTimer = time.AfterFunc(delay, func() {
 		oneJobMu.Lock()
@@ -832,13 +855,15 @@ func startFrp(oneJob *OneJob) {
 				// 新增统一重试策略
 				if duration < 30*time.Second || exitCode != 0 {
 					logf("触发自动重试机制")
-					// 在重试之前增加等待时间，确保资源完全释放
-					time.Sleep(3 * time.Second)
+					// 立即执行重试，不再延迟等待
 					if isConnectionError {
 						// 对于连接错误，使用连接失败重试机制
 						oneJob.scheduleConnectionFailureRetry()
 					} else {
-						// 其他错误使用通用重试机制
+						// 其他错误使用通用重试机制，但首次重试应该立即执行
+						oneJob.mu.Lock()
+						oneJob.retryCount = 0 // 重置计数器以实现立即重试
+						oneJob.mu.Unlock()
 						oneJob.scheduleRetry()
 					}
 				}
@@ -877,17 +902,8 @@ func (j *OneJob) healthCheck() {
 			alive := j.isProcessAlive()
 			if !alive {
 				logf("健康检查：进程已停止，触发重启")
-				// 在新的goroutine中执行重试，避免死锁
-				go func() {
-					closeFrp(j)
-					ipCacheMu.Lock()
-					ipCache = ""
-					ipCacheMu.Unlock()
-					oneJobMu.Lock()
-					defer oneJobMu.Unlock()
-					logf("因健康检查失败触发重试")
-					RunOnce(j.vipConfig)
-				}()
+				// 不再重复触发重启，因为进程监控协程应该已经处理了
+				logf("进程监控协程应该已经处理了退出事件，无需重复触发")
 				oneJobMu.Unlock()
 				return
 			}
